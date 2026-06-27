@@ -7,4 +7,4 @@
 ../Core/Src/can_proto.c:76:13:handle_homing	24	static
 ../Core/Src/can_proto.c:100:13:handle_clear_error	24	static
 ../Core/Src/can_proto.c:117:13:handle_move	32	static
-../Core/Src/can_proto.c:161:6:can_process_frame	16	static
+../Core/Src/can_proto.c:167:6:can_process_frame	16	static

@@ -1,5 +1,6 @@
 #include "../Inc/stepper.h"
 #include "../Inc/gpio.h"
+#include "../Inc/trajectory.h"
 
 static uint16_t limit_debounce[AXIS_COUNT];
 static const uint8_t home_dir[AXIS_COUNT] = {
@@ -146,10 +147,11 @@ void stepper_update_10us(void)
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         if (axis[i].homing) {
             if (limit_pressed_debounced(i)) {
-                axis[i].current_step = 0;
-                axis[i].target_step = 0;
-                axis[i].seg_start_step = 0;
-                axis[i].seg_end_step = 0;
+                int32_t home_step = trajectory_angle_raw_to_step(i, trajectory_axis_home_raw(i));
+                axis[i].current_step = home_step;
+                axis[i].target_step = home_step;
+                axis[i].seg_start_step = home_step;
+                axis[i].seg_end_step = home_step;
                 axis[i].seg_delta_step = 0;
                 axis[i].seg_total_ms = 0;
                 axis[i].seg_elapsed_ms = 0;

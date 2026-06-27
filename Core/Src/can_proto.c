@@ -144,6 +144,12 @@ static void handle_move(const uint8_t *data, uint8_t len)
         can_send_status();                // 에러 상태 송신
         return;
     }
+    if (!trajectory_angle_raw_in_limit(point.motor_id, point.target_pos)) {
+        trajectory_cancel_staging();      // 동작 범위 밖 명령은 조립 중인 명령도 폐기
+        global_motor_error = ERR_INVALID_CMD;  // 축별 각도 제한 초과
+        can_send_status();                // 에러 상태 송신
+        return;
+    }
 
     stage_result = trajectory_stage_command(&point);  // 축별 프레임을 다축 이동 명령으로 조립
     if (stage_result == TRAJECTORY_STAGE_INVALID) {

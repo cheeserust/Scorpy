@@ -14,6 +14,15 @@ static volatile uint8_t queue_count;  // 큐에 저장된 명령 개수
 static StagingState staging;          // CAN으로 나눠 받은 축별 명령 조립 상태
 
 static const int32_t gear_ratio[AXIS_COUNT] = { 20, 20, 75, 30 };  // 각 축 감속비
+static const int32_t angle_min_raw[AXIS_COUNT] = {
+    -9000, -9000, -8000, -9000
+};  // 각 축 최소 각도, 0.01도 단위
+static const int32_t angle_max_raw[AXIS_COUNT] = {
+    18000, 9000, 8000, 9000
+};  // 각 축 최대 각도, 0.01도 단위
+static const int32_t home_angle_raw[AXIS_COUNT] = {
+    -9000, -9000, -8000, -9000
+};  // homing 완료 후 논리 home 각도, 0.01도 단위
 
 static uint8_t any_axis_busy(void)
 {
@@ -87,6 +96,20 @@ int32_t trajectory_angle_raw_to_step(uint8_t axis_id, int32_t angle_raw)
     return (int32_t)(numerator / 36000);  // 0.01도 단위 raw 각도를 마이크로스텝 수로 변환
 }
 
+int32_t trajectory_axis_home_raw(uint8_t axis_id)
+{
+    if (axis_id >= AXIS_COUNT) return 0;
+    return home_angle_raw[axis_id];
+}
+
+uint8_t trajectory_angle_raw_in_limit(uint8_t axis_id, int32_t angle_raw)
+{
+    if (axis_id >= AXIS_COUNT) return 0;
+    if (angle_raw < angle_min_raw[axis_id]) return 0;
+    if (angle_raw > angle_max_raw[axis_id]) return 0;
+    return 1;
+}
+
 uint8_t trajectory_check_staging_timeout(void)
 {
     if (!staging.active) return 0;  // 조립 중인 명령이 없으면 정상
@@ -108,6 +131,10 @@ uint8_t trajectory_stage_command(const TrajectoryPoint *point)
 
     if (!execute || relative || step_mode || reserved || point->motor_id >= AXIS_COUNT) {
         staging_clear();  // 지원하지 않는 플래그 또는 축 번호면 조립 취소
+        return TRAJECTORY_STAGE_INVALID;  // 잘못된 명령
+    }
+    if (!trajectory_angle_raw_in_limit(point->motor_id, point->target_pos)) {
+        staging_clear();  // 축별 동작 범위를 벗어난 목표 각도면 조립 취소
         return TRAJECTORY_STAGE_INVALID;  // 잘못된 명령
     }
 

@@ -54,6 +54,8 @@ typedef struct {
 } StagingState;
 
 static const int32_t gear_ratio[AXIS_COUNT] = { 20, 20, 75, 30 };
+static const int32_t angle_min_raw[AXIS_COUNT] = { -9000, -9000, -8000, -9000 };
+static const int32_t angle_max_raw[AXIS_COUNT] = { 18000, 9000, 8000, 9000 };
 static MultiAxisTrajectoryPoint queue[MULTI_AXIS_QUEUE_SIZE];
 static StagingState staging;
 static uint8_t queue_head;
@@ -99,6 +101,14 @@ static int32_t angle_raw_to_step(uint8_t axis_id, int32_t angle_raw)
                         MOTOR_STEPS_PER_REV *
                         MICROSTEP;
     return (int32_t)(numerator / 36000);
+}
+
+static uint8_t angle_raw_in_limit(uint8_t axis_id, int32_t angle_raw)
+{
+    if (axis_id >= AXIS_COUNT) return 0;
+    if (angle_raw < angle_min_raw[axis_id]) return 0;
+    if (angle_raw > angle_max_raw[axis_id]) return 0;
+    return 1;
 }
 
 static void send_status(const char *tag)
@@ -154,7 +164,8 @@ static uint8_t stage_point(const TrajectoryPoint *point)
 
     if (check_timeout()) return ERR_INVALID_CMD;
 
-    if (!execute || relative || step_mode || reserved || point->motor_id >= AXIS_COUNT) {
+    if (!execute || relative || step_mode || reserved || point->motor_id >= AXIS_COUNT ||
+        !angle_raw_in_limit(point->motor_id, point->target_pos)) {
         staging.active = 0;
         staging.next_motor_id = 0;
         return ERR_INVALID_CMD;
@@ -253,12 +264,28 @@ static void process_frame(uint16_t id, const uint8_t *data, uint8_t len)
         point.duration_5ms = data[7];
 
         if (!enabled || state == STATE_ESTOP || error != ERR_NONE) return;
+        if (point.motor_id >= AXIS_COUNT) {
+            error = ERR_INVALID_CMD;
+            state = STATE_ERROR;
+            staging.active = 0;
+            staging.next_motor_id = 0;
+            send_status("MOVE_BAD_AXIS");
+            return;
+        }
         if (!(homing_done_bits & (1U << point.motor_id))) {
             error = ERR_INVALID_CMD;
             state = STATE_ERROR;
             staging.active = 0;
             staging.next_motor_id = 0;
             send_status("MOVE_REJECT");
+            return;
+        }
+        if (!angle_raw_in_limit(point.motor_id, point.target_pos)) {
+            error = ERR_INVALID_CMD;
+            state = STATE_ERROR;
+            staging.active = 0;
+            staging.next_motor_id = 0;
+            send_status("MOVE_LIMIT");
             return;
         }
 
@@ -318,6 +345,8 @@ int main(void)
     send_homing_all();
 
     send_board1_point(3000, 1000, -500, 0, 10U);
+    send_board1_point(18100, 0, 0, 0, 10U);
+    process_frame(CAN_ID_CLEAR_ERROR, data, 1U);
     send_move(0U, execute, 3100, 0U, 10U);
     send_move(2U, execute, -400, 0U, 10U);
 
