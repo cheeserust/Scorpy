@@ -1,18 +1,28 @@
-floor_markers:
+markers:
   4:
     floor_number: 4
-    map_yaml: "/home/ubuntu/fp_ws/final_project/flooring/maps/4f.yaml"
+    map_yaml: "maps/4f.yaml"
     initial_pose:
-      x: 0.8
-      y: 0.3
-      yaw: 1.57
+      x: -3.267
+      y: -21.843
+      yaw: 0
+
   5:
     floor_number: 5
-    map_yaml: "/home/ubuntu/fp_ws/final_project/flooring/maps/5f.yaml"
+    map_yaml: "maps/5f.yaml"
     initial_pose:
-      x: 0.8
-      y: 0.3
-      yaw: 1.57
-    
+      x: -2.411
+      y: -1.390
+      yaw: 0
+  
+  4_elevator:
+    floor_number: 4
+    map_yaml: "maps/4f.yaml"
+    current_pose: 
+      x:
+      y:
+      yaw:
+  
+  
       
    

@@ -17,7 +17,9 @@ dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
 params = aruco.DetectorParameters()
 detector = aruco.ArucoDetector(dictionary, params)
 
-cap = cv2.VideoCapture("/dev/video0") # Change camera index if needed
+cap = cv2.VideoCapture(2)
+# camera index 0 & 1 = laptop cam
+#              2 & 3 = webcam
 if not cap.isOpened():
     print("Camera failed to open")
     exit()
