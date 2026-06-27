@@ -27,12 +27,12 @@ static void tmc5160_write(uint8_t axis_id, uint8_t addr, uint32_t data)
     uint8_t tx[5];  // TMC5160 write frame: 주소 1바이트 + 데이터 4바이트
 
     if (axis_id >= AXIS_COUNT) return;  // 잘못된 축 번호는 무시
-
+    
     tx[0] = addr | 0x80U;          // write bit가 set된 레지스터 주소
-    tx[1] = (uint8_t)(data >> 24); // 데이터 최상위 바이트
-    tx[2] = (uint8_t)(data >> 16); // 데이터 상위 바이트
-    tx[3] = (uint8_t)(data >> 8);  // 데이터 하위 바이트
-    tx[4] = (uint8_t)data;         // 데이터 최하위 바이트
+    tx[1] = (uint8_t)(data >> 24); // data MSB
+    tx[2] = (uint8_t)(data >> 16); 
+    tx[3] = (uint8_t)(data >> 8);  
+    tx[4] = (uint8_t)data;         // data LSB
 
     tmc_cs_low(axis_id);  // 대상 축 TMC5160 선택
     for (uint8_t byte = 0; byte < 5U; byte++) {
