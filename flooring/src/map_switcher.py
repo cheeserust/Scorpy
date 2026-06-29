@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# 
+"""
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+  이 코드는 vicpinky 안에서 실행되는 코드입니다  
+
+        나중에 디버깅용 로그 코드 지우기
+
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+"""
+
 import yaml
 import os
 
@@ -29,49 +40,61 @@ class MapSwitcher(Node):
         self.aruco_params = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
 
-        self.cap = cv2.VideoCapture('/dev/video2')
+        self.cap = cv2.VideoCapture('/dev/video0') #webcam = 0 / 1
         if not self.cap.isOpened():
-            self.get_logger().error('Failed to open /dev/video2')
+            self.get_logger().error('Failed to open /dev/video0')
 
         # poll camera at 10 Hz — plenty for marker detection, light on CPU
         self.timer = self.create_timer(0.1, self.on_camera_frame)
 
     def on_camera_frame(self):
+        t_read_start = self.get_clock().now()
         ret, frame = self.cap.read()
+        t_read_end = self.get_clock().now()
+
         if not ret:
             self.get_logger().warn('Camera frame read failed')
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
+        t_detect_end = self.get_clock().now()
+
+        read_ms = (t_read_end - t_read_start).nanoseconds / 1e6
+        detect_ms = (t_detect_end - t_read_end).nanoseconds / 1e6
+        self.get_logger().info(f'[timing] cap.read(): {read_ms:.1f}ms, detectMarkers(): {detect_ms:.1f}ms')
 
         if ids is None or len(ids) == 0:
-            return  # no marker this frame
+            return
 
-        marker_id = int(ids[0][0])  # take first detected marker
+        marker_id = int(ids[0][0])
 
         if marker_id == self.last_marker_id:
-            return  # debounce: same marker as last trigger, ignore
+            return
 
         if marker_id not in self.marker_table:
-            return  # unknown marker (e.g. button_panel type) — ignore for map switching
+            return
+
+        t_marker_seen = self.get_clock().now()
+        self.get_logger().info(f'[timing] Marker {marker_id} detected at frame timestamp')
 
         self.last_marker_id = marker_id
         map_yaml, (x, y, yaw) = self.marker_table[marker_id]
-        self.get_logger().info(f'Marker {marker_id} -> loading {map_yaml}')
-        self.switch_map(map_yaml, x, y, yaw)
+        self.switch_map(map_yaml, x, y, yaw, t_marker_seen)
 
-    def switch_map(self, map_yaml, x, y, yaw):
+    def switch_map(self, map_yaml, x, y, yaw, t_marker_seen):
         if not self.load_map_cli.wait_for_service(timeout_sec=2.0):
             self.get_logger().error('load_map service not available')
             return
 
         req = LoadMap.Request()
         req.map_url = map_yaml
+        t_call_start = self.get_clock().now()
         future = self.load_map_cli.call_async(req)
-        future.add_done_callback(lambda f: self.on_map_loaded(f, x, y, yaw))
+        future.add_done_callback(lambda f: self.on_map_loaded(f, x, y, yaw, t_marker_seen, t_call_start))
 
-    def on_map_loaded(self, future, x, y, yaw):
+    def on_map_loaded(self, future, x, y, yaw, t_marker_seen, t_call_start):
+        t_call_end = self.get_clock().now()
         result = future.result()
         if result is None or result.result != 0:
             self.get_logger().error(f'load_map failed: {result}')
@@ -85,7 +108,12 @@ class MapSwitcher(Node):
         pose_msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         pose_msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
         self.pose_pub.publish(pose_msg)
-        self.get_logger().info('Map loaded, AMCL re-initialized')
+
+        total_ms = (t_call_end - t_marker_seen).nanoseconds / 1e6
+        call_ms = (t_call_end - t_call_start).nanoseconds / 1e6
+        self.get_logger().info(
+            f'[timing] load_map call: {call_ms:.1f}ms, total marker->map_loaded: {total_ms:.1f}ms'
+        )
 
     def destroy_node(self):
         self.cap.release()
