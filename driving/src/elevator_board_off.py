@@ -20,16 +20,15 @@ FLOOR_MAP = {                    # floor-id 마커 → 로드할 맵 (floor_mark
     4: "maps/floor4.yaml",
     5: "maps/floor5.yaml",
 }
-DRIVE_SPEED       = 0.10         # m/s, 안전하게 느리게
-TURN_SPEED        = 0.5          # rad/s
+DRIVE_SPEED       = 0.15         # m/s, 안전하게 느리게
 BOARD_DRIVE_SEC   = 3.0          # 전진 탑승 시간(거리 = 속도×시간). 캐빈 깊이에 맞게
 EXIT_DRIVE_SEC    = 3.0          # 하차 주행 시간
 
 #turning 관련 => 일단 보류
+#TURN_SPEED        = 0.5          # rad/s
 #TURN_AFTER_BOARD  = False        # (A)안 쓰려면 True. False면 후진하차.
 
 DEBOUNCE_FRAMES   = 5            # 마커가 N프레임 연속 보여야 "진짜 보임"으로 인정 (오검출 방지)
-IMAGE_TOPIC       = "/image_raw" # 카메라 노드(v4l2_camera 등) 토픽명에 맞게
 CONTROL_HZ        = 10.0
 # ────────────────────────────────────────────────────────────
 
@@ -56,7 +55,16 @@ class ElevatorMVP(Node):
 
         # I/O
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
-        self.create_subscription(Image, IMAGE_TOPIC, self.image_cb, qos_profile_sensor_data)
+        # 카메라별 디바운스 카운트
+        self.front_seen = {}   # 앞 카메라
+        self.rear_seen  = {}   # 뒤 카메라
+
+        self.create_subscription(Image, FRONT_IMAGE_TOPIC,
+                                lambda m: self.image_cb(m, self.front_seen),
+                                qos_profile_sensor_data)
+        self.create_subscription(Image, REAR_IMAGE_TOPIC,
+                                lambda m: self.image_cb(m, self.rear_seen),
+                                qos_profile_sensor_data)        
         self.map_cli = self.create_client(LoadMap, "/map_server/load_map")
 
         # 상태 변수
@@ -106,24 +114,10 @@ class ElevatorMVP(Node):
                 self.state = RIDING    # 탄 상태 운행 대기
                 self.get_logger().info("탑승 완료 → 운행 대기(RIDING)")
         
-        
-            """
-            회전관련 = 일단 보류
-            elif self.state == TURNING:
-                turn_sec = math.pi / TURN_SPEED              # 180° 도는 데 걸리는 시간
-                if t - self.phase_start < turn_sec:
-                    self.drive(angular=TURN_SPEED)
-                else:
-                    self.stop()
-                    self.state = RIDING
-                    self.get_logger().info("회전 완료 → 운행 대기(RIDING)")
-            """
-        
-        
         elif self.state == RIDING:
             # 층 이동 후 문이 열리면 바깥 floor-id 마커가 보인다.
             for floor in FLOOR_MAP:
-                marker_id = floor                        # 여기선 floor-id 마커 ID = 층번호로 가정
+                marker_id = floor    # 마커 ID = 층번호로 설정
                 if self.stable_seen(self.rear_seen, marker_id):
                     self.target_floor = floor
                     self.get_logger().info(f"도착 문 열림 감지 → {floor}층")
@@ -137,7 +131,7 @@ class ElevatorMVP(Node):
             # exit_speed = DRIVE_SPEED if TURN_AFTER_BOARD else -DRIVE_SPEED
             
             if t - self.phase_start < EXIT_DRIVE_SEC:
-                self.drive(linear=exit_speed)
+                self.drive(linear=-DRIVE_SPEED) # 후진속도
             else:
                 self.stop()
                 self.load_map(FLOOR_MAP[self.target_floor])  # 하차 직후 해당 층 맵 로드
@@ -147,6 +141,18 @@ class ElevatorMVP(Node):
 
         elif self.state == DONE:
             self.stop()
+        
+        """
+        회전관련 = 일단 보류
+        elif self.state == TURNING:
+            turn_sec = math.pi / TURN_SPEED              # 180° 도는 데 걸리는 시간
+            if t - self.phase_start < turn_sec:
+                self.drive(angular=TURN_SPEED)
+            else:
+                self.stop()
+                self.state = RIDING
+                self.get_logger().info("회전 완료 → 운행 대기(RIDING)")
+        """
 
     # ── 헬퍼 ────────────────────────────────────────────────
     def drive(self, linear=0.0, angular=0.0):
