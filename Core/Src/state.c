@@ -36,14 +36,14 @@ uint8_t system_homing_done_bits(void)
 {
     uint8_t bits = 0;
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        if (axis[i].homing_done) bits |= (uint8_t)(1U << i);
+        if (axis[i].homing_done) bits |= (uint8_t)(1 << i);
     }
     return bits;
 }
 
 uint8_t system_enabled_status(void)
 {
-    return global_motor_enabled ? 1U : 0U;
+    return global_motor_enabled ? 1 : 0;
 }
 
 uint8_t system_first_moving_axis(void)
@@ -51,5 +51,5 @@ uint8_t system_first_moving_axis(void)
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         if (axis[i].moving || axis[i].homing) return i;
     }
-    return 255U;
+    return 255;
 }

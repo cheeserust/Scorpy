@@ -27,7 +27,7 @@ static const int32_t home_angle_raw[AXIS_COUNT] = {
 static uint8_t any_axis_busy(void)
 {
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        if (axis[i].homing || axis[i].moving || axis[i].seg_total_ms != 0U) return 1;  // 원점복귀/이동/세그먼트 실행 중
+        if (axis[i].homing || axis[i].moving || axis[i].seg_total_ms != 0) return 1;  // 원점복귀/이동/세그먼트 실행 중
     }
     return 0;  // 모든 축이 대기 상태
 }
@@ -36,16 +36,16 @@ static uint8_t queue_push(const MultiAxisTrajectoryPoint *point)
 {
     if (queue_count >= MULTI_AXIS_QUEUE_SIZE) return 0;  // 큐가 가득 차면 실패
     queue[queue_head] = *point;  // 현재 head 위치에 명령 저장
-    queue_head = (uint8_t)((queue_head + 1U) % MULTI_AXIS_QUEUE_SIZE);  // 원형 큐 head 증가
+    queue_head = (uint8_t)((queue_head + 1) % MULTI_AXIS_QUEUE_SIZE);  // 원형 큐 head 증가
     queue_count++;  // 저장된 명령 개수 증가
     return 1;       // 큐 입력 성공
 }
 
 static uint8_t queue_pop(MultiAxisTrajectoryPoint *point)
 {
-    if (queue_count == 0U) return 0;  // 큐가 비어 있으면 실패
+    if (queue_count == 0) return 0;  // 큐가 비어 있으면 실패
     *point = queue[queue_tail];  // 현재 tail 위치의 명령 복사
-    queue_tail = (uint8_t)((queue_tail + 1U) % MULTI_AXIS_QUEUE_SIZE);  // 원형 큐 tail 증가
+    queue_tail = (uint8_t)((queue_tail + 1) % MULTI_AXIS_QUEUE_SIZE);  // 원형 큐 tail 증가
     queue_count--;  // 저장된 명령 개수 감소
     return 1;       // 큐 출력 성공
 }
@@ -122,10 +122,10 @@ uint8_t trajectory_check_staging_timeout(void)
 
 uint8_t trajectory_stage_command(const TrajectoryPoint *point)
 {
-    uint8_t execute = (point->flags & 0x08U) ? 1U : 0U;    // 실행 플래그
-    uint8_t relative = (point->flags & 0x04U) ? 1U : 0U;   // 상대좌표 플래그
-    uint8_t step_mode = (point->flags & 0x02U) ? 1U : 0U;  // 스텝 직접 명령 플래그
-    uint8_t reserved = (point->flags & 0x01U) ? 1U : 0U;   // 예약 플래그
+    uint8_t execute = (point->flags & 0x08) ? 1 : 0;    // 실행 플래그
+    uint8_t relative = (point->flags & 0x04) ? 1 : 0;   // 상대좌표 플래그
+    uint8_t step_mode = (point->flags & 0x02) ? 1 : 0;  // 스텝 직접 명령 플래그
+    uint8_t reserved = (point->flags & 0x01) ? 1 : 0;   // 예약 플래그
 
     if (trajectory_check_staging_timeout()) return TRAJECTORY_STAGE_INVALID;  // 이전 조립 명령이 시간 초과되면 실패
 
@@ -139,7 +139,7 @@ uint8_t trajectory_stage_command(const TrajectoryPoint *point)
     }
 
     if (!staging.active) {
-        if (point->motor_id != 0U) return TRAJECTORY_STAGE_INVALID;  // 다축 명령은 0번 축부터 순서대로 수신
+        if (point->motor_id != 0) return TRAJECTORY_STAGE_INVALID;  // 다축 명령은 0번 축부터 순서대로 수신
         staging_clear();  // 새 조립 시작 전 상태 초기화
         staging.active = 1;  // 스테이징 시작
         staging.start_ms = global_tick_ms;  // 타임아웃 기준 시간 저장
@@ -172,11 +172,11 @@ uint8_t trajectory_stage_command(const TrajectoryPoint *point)
 
 static void start_axis_segment(uint8_t axis_id, const MultiAxisTrajectoryPoint *point)
 {
-    uint16_t duration_ms = (uint16_t)point->duration_5ms * 5U;  // 5ms 단위를 실제 ms로 변환
+    uint16_t duration_ms = (uint16_t)point->duration_5ms * 5;  // 5ms 단위를 실제 ms로 변환
     int32_t target_step = trajectory_angle_raw_to_step(axis_id, point->target_pos[axis_id]);  // 목표 각도를 스텝 위치로 변환
     (void)point->speed[axis_id];  // 현재 보간은 duration 기반이라 speed 필드는 보관만 함
 
-    if (duration_ms == 0U) duration_ms = 1U;  // 0ms 명령은 최소 1ms로 보정
+    if (duration_ms == 0) duration_ms = 1;  // 0ms 명령은 최소 1ms로 보정
 
     axis[axis_id].seg_start_step = axis[axis_id].current_step;  // 세그먼트 시작 위치
     axis[axis_id].seg_end_step = target_step;                   // 세그먼트 종료 위치
@@ -184,7 +184,7 @@ static void start_axis_segment(uint8_t axis_id, const MultiAxisTrajectoryPoint *
     axis[axis_id].seg_total_ms = duration_ms;    // 세그먼트 총 실행 시간
     axis[axis_id].seg_elapsed_ms = 0;            // 세그먼트 경과 시간 초기화
     axis[axis_id].target_step = axis[axis_id].seg_start_step;  // 첫 목표 위치를 시작 위치로 설정
-    axis[axis_id].moving = (axis[axis_id].seg_delta_step != 0) ? 1U : 0U;  // 이동량이 있으면 moving 표시
+    axis[axis_id].moving = (axis[axis_id].seg_delta_step != 0) ? 1 : 0;  // 이동량이 있으면 moving 표시
 }
 
 static void try_start_next_point(void)
@@ -204,7 +204,7 @@ void trajectory_update_1ms(void)
     try_start_next_point();  // 실행 가능한 다음 궤적 명령 시작
 
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        if (axis[i].homing || axis[i].seg_total_ms == 0U) continue;  // homing 중이거나 실행 세그먼트가 없으면 건너뜀
+        if (axis[i].homing || axis[i].seg_total_ms == 0) continue;  // homing 중이거나 실행 세그먼트가 없으면 건너뜀
 
         if (axis[i].seg_elapsed_ms < axis[i].seg_total_ms) {
             int64_t delta = (int64_t)axis[i].seg_delta_step *
@@ -212,12 +212,12 @@ void trajectory_update_1ms(void)
             axis[i].target_step = axis[i].seg_start_step +
                                   (int32_t)(delta / axis[i].seg_total_ms);  // 선형 보간 목표 위치
             axis[i].seg_elapsed_ms++;  // 1ms 진행
-            axis[i].moving = (axis[i].seg_delta_step != 0) ? 1U : 0U;  // 이동량이 있으면 moving 유지
+            axis[i].moving = (axis[i].seg_delta_step != 0) ? 1 : 0;  // 이동량이 있으면 moving 유지
         } else {
             axis[i].target_step = axis[i].seg_end_step;  // 마지막 목표 위치를 정확히 종료 위치로 맞춤
             axis[i].seg_total_ms = 0;                    // 세그먼트 완료 표시
             axis[i].seg_elapsed_ms = 0;                  // 경과 시간 초기화
-            axis[i].moving = (axis[i].current_step != axis[i].target_step) ? 1U : 0U;  // 실제 위치가 남았으면 moving 유지
+            axis[i].moving = (axis[i].current_step != axis[i].target_step) ? 1 : 0;  // 실제 위치가 남았으면 moving 유지
         }
     }
 }

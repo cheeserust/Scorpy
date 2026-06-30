@@ -13,9 +13,9 @@ int32_t trajectory_angle_raw_to_step(uint8_t axis_id, int32_t angle_raw);
 int32_t trajectory_axis_home_raw(uint8_t axis_id);
 uint8_t trajectory_angle_raw_in_limit(uint8_t axis_id, int32_t angle_raw);
 
-#define TRAJECTORY_STAGE_WAITING     0U
-#define TRAJECTORY_STAGE_COMMITTED   1U
-#define TRAJECTORY_STAGE_INVALID     2U
-#define TRAJECTORY_STAGE_QUEUE_FULL  3U
+#define TRAJECTORY_STAGE_WAITING     0
+#define TRAJECTORY_STAGE_COMMITTED   1
+#define TRAJECTORY_STAGE_INVALID     2
+#define TRAJECTORY_STAGE_QUEUE_FULL  3
 
 #endif

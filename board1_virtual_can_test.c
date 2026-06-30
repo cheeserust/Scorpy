@@ -11,26 +11,26 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define AXIS_COUNT               4U
-#define TRAJECTORY_QUEUE_SIZE    32U
+#define AXIS_COUNT               4
+#define TRAJECTORY_QUEUE_SIZE    32
 #define MULTI_AXIS_QUEUE_SIZE    (TRAJECTORY_QUEUE_SIZE / AXIS_COUNT)
 #define MOTOR_STEPS_PER_REV      200
 #define MICROSTEP                16
-#define STAGING_TIMEOUT_MS       20U
+#define STAGING_TIMEOUT_MS       20
 
-#define CAN_ID_ESTOP             0x001U
-#define CAN_ID_ENABLE            0x010U
-#define CAN_ID_HOMING            0x020U
-#define CAN_ID_CLEAR_ERROR       0x030U
-#define CAN_ID_BOARD1_MOVE       0x101U
+#define CAN_ID_ESTOP             0x001
+#define CAN_ID_ENABLE            0x010
+#define CAN_ID_HOMING            0x020
+#define CAN_ID_CLEAR_ERROR       0x030
+#define CAN_ID_BOARD1_MOVE       0x101
 
-#define STATE_IDLE               1U
-#define STATE_ERROR              4U
-#define STATE_ESTOP              5U
+#define STATE_IDLE               1
+#define STATE_ERROR              4
+#define STATE_ESTOP              5
 
-#define ERR_NONE                 0U
-#define ERR_INVALID_CMD          1U
-#define ERR_QUEUE_FULL           5U
+#define ERR_NONE                 0
+#define ERR_INVALID_CMD          1
+#define ERR_QUEUE_FULL           5
 
 typedef struct {
     uint8_t motor_id;
@@ -138,7 +138,7 @@ static uint8_t queue_push(const MultiAxisTrajectoryPoint *point)
 {
     if (queue_count >= MULTI_AXIS_QUEUE_SIZE) return 0;
     queue[queue_head] = *point;
-    queue_head = (uint8_t)((queue_head + 1U) % MULTI_AXIS_QUEUE_SIZE);
+    queue_head = (uint8_t)((queue_head + 1) % MULTI_AXIS_QUEUE_SIZE);
     queue_count++;
     return 1;
 }
@@ -158,10 +158,10 @@ static uint8_t check_timeout(void)
 
 static uint8_t stage_point(const TrajectoryPoint *point)
 {
-    uint8_t execute = (point->flags & 0x08U) ? 1U : 0U;
-    uint8_t relative = (point->flags & 0x04U) ? 1U : 0U;
-    uint8_t step_mode = (point->flags & 0x02U) ? 1U : 0U;
-    uint8_t reserved = (point->flags & 0x01U) ? 1U : 0U;
+    uint8_t execute = (point->flags & 0x08) ? 1 : 0;
+    uint8_t relative = (point->flags & 0x04) ? 1 : 0;
+    uint8_t step_mode = (point->flags & 0x02) ? 1 : 0;
+    uint8_t reserved = (point->flags & 0x01) ? 1 : 0;
 
     if (check_timeout()) return ERR_INVALID_CMD;
 
@@ -173,7 +173,7 @@ static uint8_t stage_point(const TrajectoryPoint *point)
     }
 
     if (!staging.active) {
-        if (point->motor_id != 0U) return ERR_INVALID_CMD;
+        if (point->motor_id != 0) return ERR_INVALID_CMD;
         staging.active = 1;
         staging.next_motor_id = 0;
         staging.start_ms = tick_ms;
@@ -197,11 +197,11 @@ static uint8_t stage_point(const TrajectoryPoint *point)
     }
 
     printf("POINT_COMMIT      duration_ms=%u steps=[%ld,%ld,%ld,%ld]\n",
-           (unsigned)staging.point.duration_5ms * 5U,
-           (long)angle_raw_to_step(0U, staging.point.target_pos[0]),
-           (long)angle_raw_to_step(1U, staging.point.target_pos[1]),
-           (long)angle_raw_to_step(2U, staging.point.target_pos[2]),
-           (long)angle_raw_to_step(3U, staging.point.target_pos[3]));
+           (unsigned)staging.point.duration_5ms * 5,
+           (long)angle_raw_to_step(0, staging.point.target_pos[0]),
+           (long)angle_raw_to_step(1, staging.point.target_pos[1]),
+           (long)angle_raw_to_step(2, staging.point.target_pos[2]),
+           (long)angle_raw_to_step(3, staging.point.target_pos[3]));
     staging.active = 0;
     staging.next_motor_id = 0;
     return ERR_NONE;
@@ -218,8 +218,8 @@ static void process_frame(uint16_t id, const uint8_t *data, uint8_t len)
         return;
     }
 
-    if (id == CAN_ID_ENABLE && len >= 1U) {
-        enabled = (data[0] == 1U) ? 1U : 0U;
+    if (id == CAN_ID_ENABLE && len >= 1) {
+        enabled = (data[0] == 1) ? 1 : 0;
         if (enabled) {
             error = ERR_NONE;
             state = STATE_IDLE;
@@ -230,13 +230,13 @@ static void process_frame(uint16_t id, const uint8_t *data, uint8_t len)
         return;
     }
 
-    if (id == CAN_ID_HOMING && len >= 2U) {
-        if (!enabled || state == STATE_ESTOP || data[1] != 0U) return;
+    if (id == CAN_ID_HOMING && len >= 2) {
+        if (!enabled || state == STATE_ESTOP || data[1] != 0) return;
         error = ERR_NONE;
         state = STATE_IDLE;
         clear_queue();
-        if (data[0] == 255U) homing_done_bits = 0x0FU;
-        else if (data[0] < AXIS_COUNT) homing_done_bits |= (uint8_t)(1U << data[0]);
+        if (data[0] == 255) homing_done_bits = 0x0F;
+        else if (data[0] < AXIS_COUNT) homing_done_bits |= (uint8_t)(1 << data[0]);
         else {
             error = ERR_INVALID_CMD;
             state = STATE_ERROR;
@@ -254,11 +254,11 @@ static void process_frame(uint16_t id, const uint8_t *data, uint8_t len)
         return;
     }
 
-    if (id == CAN_ID_BOARD1_MOVE && len >= 8U) {
+    if (id == CAN_ID_BOARD1_MOVE && len >= 8) {
         TrajectoryPoint point;
         uint8_t result;
 
-        point.motor_id = data[0] & 0x0FU;
+        point.motor_id = data[0] & 0x0F;
         point.flags = data[0] >> 4;
         point.target_pos = get_i32_le(&data[1]);
         point.speed = get_u16_le(&data[5]);
@@ -273,7 +273,7 @@ static void process_frame(uint16_t id, const uint8_t *data, uint8_t len)
             send_status("MOVE_BAD_AXIS");
             return;
         }
-        if (!(homing_done_bits & (1U << point.motor_id))) {
+        if (!(homing_done_bits & (1 << point.motor_id))) {
             error = ERR_INVALID_CMD;
             state = STATE_ERROR;
             staging.active = 0;
@@ -308,65 +308,65 @@ static void process_frame(uint16_t id, const uint8_t *data, uint8_t len)
 static void send_enable(uint8_t on)
 {
     uint8_t data[8] = { on };
-    process_frame(CAN_ID_ENABLE, data, 1U);
+    process_frame(CAN_ID_ENABLE, data, 1);
 }
 
 static void send_homing_all(void)
 {
-    uint8_t data[8] = { 255U, 0U };
-    process_frame(CAN_ID_HOMING, data, 2U);
+    uint8_t data[8] = { 255, 0 };
+    process_frame(CAN_ID_HOMING, data, 2);
 }
 
 static void send_move(uint8_t motor_id, uint8_t flags, int32_t target, uint16_t speed, uint8_t duration_5ms)
 {
     uint8_t data[8] = { 0 };
-    data[0] = (uint8_t)((flags << 4) | (motor_id & 0x0FU));
+    data[0] = (uint8_t)((flags << 4) | (motor_id & 0x0F));
     put_i32_le(&data[1], target);
     put_u16_le(&data[5], speed);
     data[7] = duration_5ms;
-    process_frame(CAN_ID_BOARD1_MOVE, data, 8U);
+    process_frame(CAN_ID_BOARD1_MOVE, data, 8);
 }
 
 static void send_board1_point(int32_t a0, int32_t a1, int32_t a2, int32_t a3, uint8_t duration_5ms)
 {
-    const uint8_t execute = 0x08U;
-    send_move(0U, execute, a0, 0U, duration_5ms);
-    send_move(1U, execute, a1, 0U, duration_5ms);
-    send_move(2U, execute, a2, 0U, duration_5ms);
-    send_move(3U, execute, a3, 0U, duration_5ms);
+    const uint8_t execute = 0x08;
+    send_move(0, execute, a0, 0, duration_5ms);
+    send_move(1, execute, a1, 0, duration_5ms);
+    send_move(2, execute, a2, 0, duration_5ms);
+    send_move(3, execute, a3, 0, duration_5ms);
 }
 
 int main(void)
 {
-    const uint8_t execute = 0x08U;
+    const uint8_t execute = 0x08;
     uint8_t data[8] = { 0 };
 
     send_status("BOOT");
-    send_enable(1U);
+    send_enable(1);
     send_homing_all();
 
-    send_board1_point(3000, 1000, -500, 0, 10U);
-    send_board1_point(18100, 0, 0, 0, 10U);
-    process_frame(CAN_ID_CLEAR_ERROR, data, 1U);
-    send_move(0U, execute, 3100, 0U, 10U);
-    send_move(2U, execute, -400, 0U, 10U);
+    send_board1_point(3000, 1000, -500, 0, 10);
+    send_board1_point(18100, 0, 0, 0, 10);
+    process_frame(CAN_ID_CLEAR_ERROR, data, 1);
+    send_move(0, execute, 3100, 0, 10);
+    send_move(2, execute, -400, 0, 10);
 
-    process_frame(CAN_ID_CLEAR_ERROR, data, 1U);
-    send_move(0U, execute, 3100, 0U, 10U);
-    send_move(1U, execute, 1000, 0U, 11U);
+    process_frame(CAN_ID_CLEAR_ERROR, data, 1);
+    send_move(0, execute, 3100, 0, 10);
+    send_move(1, execute, 1000, 0, 11);
 
-    process_frame(CAN_ID_CLEAR_ERROR, data, 1U);
-    send_move(0U, execute, 3200, 0U, 10U);
-    tick_ms += 21U;
+    process_frame(CAN_ID_CLEAR_ERROR, data, 1);
+    send_move(0, execute, 3200, 0, 10);
+    tick_ms += 21;
     (void)check_timeout();
 
-    process_frame(CAN_ID_CLEAR_ERROR, data, 1U);
+    process_frame(CAN_ID_CLEAR_ERROR, data, 1);
     clear_queue();
     for (uint8_t i = 0; i < MULTI_AXIS_QUEUE_SIZE; i++) {
-        send_board1_point(100, 100, 100, 100, 10U);
+        send_board1_point(100, 100, 100, 100, 10);
     }
-    send_board1_point(200, 200, 200, 200, 10U);
+    send_board1_point(200, 200, 200, 200, 10);
 
-    process_frame(CAN_ID_ESTOP, data, 0U);
+    process_frame(CAN_ID_ESTOP, data, 0);
     return 0;
 }

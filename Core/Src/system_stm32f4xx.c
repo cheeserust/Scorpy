@@ -105,7 +105,7 @@
                                                      This value must be a multiple of 0x200. */
 #endif /* VECT_TAB_SRAM */
 #if !defined(VECT_TAB_OFFSET)
-#define VECT_TAB_OFFSET         0x00000000U     /*!< Vector Table offset field.
+#define VECT_TAB_OFFSET         0x00000000     /*!< Vector Table offset field.
                                                      This value must be a multiple of 0x200. */
 #endif /* VECT_TAB_OFFSET */
 #endif /* USER_VECT_TAB_ADDRESS */
@@ -168,7 +168,7 @@ void SystemInit(void)
 {
   /* FPU settings ------------------------------------------------------------*/
   #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
-    SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));  /* set CP10 and CP11 Full Access */
+    SCB->CPACR |= ((3 << 10*2)|(3 << 11*2));  /* set CP10 and CP11 Full Access */
   #endif
 
 #if defined (DATA_IN_ExtSRAM) || defined (DATA_IN_ExtSDRAM)

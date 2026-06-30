@@ -9,18 +9,18 @@ static const uint8_t home_dir[AXIS_COUNT] = {
 
 static void step_pin_high(uint8_t id)
 {
-    if (id == 0U) GPIO_SET_ODR(STEP1_PORT, STEP1_PIN);
-    else if (id == 1U) GPIO_SET_ODR(STEP2_PORT, STEP2_PIN);
-    else if (id == 2U) GPIO_SET_ODR(STEP3_PORT, STEP3_PIN);
-    else if (id == 3U) GPIO_SET_ODR(STEP4_PORT, STEP4_PIN);
+    if (id == 0) GPIO_SET_ODR(STEP1_PORT, STEP1_PIN);
+    else if (id == 1) GPIO_SET_ODR(STEP2_PORT, STEP2_PIN);
+    else if (id == 2) GPIO_SET_ODR(STEP3_PORT, STEP3_PIN);
+    else if (id == 3) GPIO_SET_ODR(STEP4_PORT, STEP4_PIN);
 }
 
 static void step_pin_low(uint8_t id)
 {
-    if (id == 0U) GPIO_CLEAR_ODR(STEP1_PORT, STEP1_PIN);
-    else if (id == 1U) GPIO_CLEAR_ODR(STEP2_PORT, STEP2_PIN);
-    else if (id == 2U) GPIO_CLEAR_ODR(STEP3_PORT, STEP3_PIN);
-    else if (id == 3U) GPIO_CLEAR_ODR(STEP4_PORT, STEP4_PIN);
+    if (id == 0) GPIO_CLEAR_ODR(STEP1_PORT, STEP1_PIN);
+    else if (id == 1) GPIO_CLEAR_ODR(STEP2_PORT, STEP2_PIN);
+    else if (id == 2) GPIO_CLEAR_ODR(STEP3_PORT, STEP3_PIN);
+    else if (id == 3) GPIO_CLEAR_ODR(STEP4_PORT, STEP4_PIN);
 }
 
 static void dir_set(uint8_t id, uint8_t dir)
@@ -28,10 +28,10 @@ static void dir_set(uint8_t id, uint8_t dir)
     GPIO_TypeDef *port = GPIOA;
     uint8_t pin = 0;
 
-    if (id == 0U) { port = DIR1_PORT; pin = DIR1_PIN; }
-    else if (id == 1U) { port = DIR2_PORT; pin = DIR2_PIN; }
-    else if (id == 2U) { port = DIR3_PORT; pin = DIR3_PIN; }
-    else if (id == 3U) { port = DIR4_PORT; pin = DIR4_PIN; }
+    if (id == 0) { port = DIR1_PORT; pin = DIR1_PIN; }
+    else if (id == 1) { port = DIR2_PORT; pin = DIR2_PIN; }
+    else if (id == 2) { port = DIR3_PORT; pin = DIR3_PIN; }
+    else if (id == 3) { port = DIR4_PORT; pin = DIR4_PIN; }
     else return;
 
     if (dir) GPIO_SET_ODR(port, pin);
@@ -40,11 +40,11 @@ static void dir_set(uint8_t id, uint8_t dir)
 
 static uint8_t limit_raw_pressed(uint8_t id)
 {
-    uint8_t value = 1U;
-    if (id == 0U) value = (uint8_t)GPIO_READ(LIM1_PORT, LIM1_PIN);
-    else if (id == 1U) value = (uint8_t)GPIO_READ(LIM2_PORT, LIM2_PIN);
-    else if (id == 2U) value = (uint8_t)GPIO_READ(LIM3_PORT, LIM3_PIN);
-    else if (id == 3U) value = (uint8_t)GPIO_READ(LIM4_PORT, LIM4_PIN);
+    uint8_t value = 1;
+    if (id == 0) value = (uint8_t)((LIM1_PORT->IDR & (1 << LIM1_PIN)) != 0);
+    else if (id == 1) value = (uint8_t)((LIM2_PORT->IDR & (1 << LIM2_PIN)) != 0);
+    else if (id == 2) value = (uint8_t)((LIM3_PORT->IDR & (1 << LIM3_PIN)) != 0);
+    else if (id == 3) value = (uint8_t)((LIM4_PORT->IDR & (1 << LIM4_PIN)) != 0);
     return (value == LIMIT_ACTIVE_LEVEL);
 }
 
@@ -62,7 +62,7 @@ uint8_t stepper_limit_status_bits(void)
 {
     uint8_t bits = 0;
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        if (limit_raw_pressed(i)) bits |= (uint8_t)(1U << i);
+        if (limit_raw_pressed(i)) bits |= (uint8_t)(1 << i);
     }
     return bits;
 }

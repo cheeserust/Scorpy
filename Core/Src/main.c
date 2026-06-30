@@ -1,61 +1,161 @@
 #include "../Inc/can_proto.h"
+#include "../Inc/config.h"
 #include "../Inc/gpio.h"
+#include "../Inc/stm32f4xx_it.h"
 #include "../Inc/mcp2515.h"
 #include "../Inc/stepper.h"
 #include "../Inc/tmc5160.h"
 #include "../Inc/trajectory.h"
 
-static void systick_init(void)
+static void clock_init_96mhz(void)
 {
-    SysTick_Config(SYSCLK_HZ / 1000UL);  // SysTick을 1ms 주기로 설정
+    RCC->CR |= (1 << 0);             // HSI ON
+    while (!(RCC->CR & (1 << 1))) {}  // HSI ready
+
+    RCC->APB1ENR |= (1 << 28);       // PWR clock enable
+    (void)RCC->APB1ENR;
+    PWR->CR |= (3 << 14);            // voltage scale 1
+
+    FLASH->ACR = (1 << 10) |         // data cache
+                 (1 << 9)  |         // instruction cache
+                 (1 << 8)  |         // prefetch
+                 (3 << 0);           // 3 wait states
+
+    RCC->CR &= ~(1 << 24);           // PLL OFF
+    while (RCC->CR & (1 << 25)) {}    // wait until PLL unlocked
+
+
+    // p105:  RCC PLL configuration register
+    // f(VCO clock) = f(PLL clock input) × (PLLN / PLLM)
+    // f(PLL general clock output) = f(VCO clock) / PLLP
+    // f(USB OTG FS, SDIO) = f(VCO clock) / PLLQ
+    // usb otg 사용할떄 48mhz 맞춰야함
+    RCC->PLLCFGR = (8 << 24) |       // PLLQ = 8, 384MHz / 8 = 48MHz
+                   (0 << 22) |       // PLLSRC = 0 HSI 16MHz
+                   (1 << 16) |       // PLLP = 4
+                   (192 << 6) |      // PLLN = 192
+                   (8 << 0);         // PLLM = 8, 16MHz / 8 * 192 / 4 = 96MHz
+
+    RCC->CFGR = (0 << 13) |          // APB2 = /1
+                (4 << 10) |          // APB1 = /2
+                (0 << 4);            // AHB = /1
+
+    RCC->CR |= (1 << 24);            // PLL ON
+    while (!(RCC->CR & (1 << 25))) {} // PLL ready
+
+    RCC->CFGR &= ~(0x3 << 0);
+    RCC->CFGR |= (0x2 << 0);         // SYSCLK = PLL
+    while (((RCC->CFGR >> 2) & 0x3) != 0x2) {}
+
+    SystemCoreClock = SYSCLK_HZ;
 }
 
-void SysTick_Handler(void)
+static void set_all_axis_enabled(uint8_t enabled)
 {
-    global_tick_ms++;  // 시스템 기준 시간(ms) 증가
-}
-
-static void tim2_init_10us(void)
-{
-    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;  // TIM2 클럭 활성화
-    (void)RCC->APB1ENR;                  // 클럭 활성화 후 레지스터 반영 대기용 dummy read
-
-    TIM2->PSC = 16U - 1U;             // 16MHz 기준 1us 타이머 tick 생성
-    TIM2->ARR = TIMER_TICK_US - 1U;   // 10us마다 update interrupt 발생
-    TIM2->DIER |= TIM_DIER_UIE;       // update interrupt enable
-    TIM2->CR1 |= TIM_CR1_CEN;         // TIM2 카운터 시작
-    NVIC_EnableIRQ(TIM2_IRQn);        // TIM2 인터럽트 NVIC 활성화
-}
-
-static void tim3_init_1ms(void)
-{
-    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;  // TIM3 클럭 활성화
-    (void)RCC->APB1ENR;                  // 클럭 활성화 후 레지스터 반영 대기용 dummy read
-
-    TIM3->PSC = 16U - 1U;       // 16MHz 기준 1us 타이머 tick 생성
-    TIM3->ARR = 1000U - 1U;     // 1ms마다 update interrupt 발생
-    TIM3->DIER |= TIM_DIER_UIE; // update interrupt enable
-    TIM3->CR1 |= TIM_CR1_CEN;   // TIM3 카운터 시작
-    NVIC_EnableIRQ(TIM3_IRQn);  // TIM3 인터럽트 NVIC 활성화
-}
-
-void TIM2_IRQHandler(void)
-{
-    if (TIM2->SR & TIM_SR_UIF) {
-        TIM2->SR &= ~TIM_SR_UIF;  // update interrupt flag clear
-        if (!global_motor_estop && global_motor_enabled) stepper_update_10us();  // 10us 주기로 스텝 펄스 갱신
-        else stepper_stop_all();  // 비상정지/비활성 상태에서는 모든 축 정지
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+        axis[i].enabled = enabled;  // 모든 축의 enable 상태를 동일하게 설정
     }
 }
 
-void TIM3_IRQHandler(void)
+static uint8_t run_can_command(const CanCommand *cmd)
 {
-    if (TIM3->SR & TIM_SR_UIF) {
-        TIM3->SR &= ~TIM_SR_UIF;  // update interrupt flag clear
-        if (!global_motor_estop && global_motor_enabled && global_motor_error == ERR_NONE) {
-            trajectory_update_1ms();  // 1ms 주기로 궤적 보간 목표 위치 갱신
+    // 1. 비상정지 명령
+    if (cmd->type == CAN_CMD_ESTOP) {
+        global_motor_estop = 1;          // 비상정지 상태 진입
+        global_motor_enabled = 0;        // 모터 구동 명령 차단
+        global_motor_error = ERR_NONE;   // 비상정지는 별도 상태로 보고 에러 코드는 초기화
+        set_all_axis_enabled(0);         // 모든 축 비활성화
+        trajectory_clear();              // 대기 중인 이동 명령 삭제
+        stepper_stop_all();              // 스텝 펄스 출력 정지
+        motor_disable();                 // 모터 드라이버 출력 비활성화
+        return 1;                        // 변경된 상태 즉시 송신
+    }
+
+    // 2. 모터 enable/disable 명령
+    if (cmd->type == CAN_CMD_ENABLE) {
+        if (cmd->enable == 1) {
+            global_motor_estop = 0;         // 비상정지 상태 해제
+            global_motor_error = ERR_NONE;  // 기존 에러 코드 초기화
+            global_motor_enabled = 1;       // 모터 구동 허용
+            set_all_axis_enabled(1);        // 모든 축 활성화
+            motor_enable();                 // 모터 드라이버 enable 핀 활성화
+        } else {
+            global_motor_enabled = 0;  // 모터 구동 금지
+            set_all_axis_enabled(0);   // 모든 축 비활성화
+            trajectory_clear();        // 남아있는 이동 명령 제거
+            stepper_stop_all();        // 진행 중인 스텝 출력 정지
+            motor_disable();           // 모터 드라이버 출력 차단
         }
+        return 1;  // enable 처리 결과 송신
     }
+
+    // 3. 원점복귀 명령
+    if (cmd->type == CAN_CMD_HOMING) {
+        if (!global_motor_enabled || global_motor_estop) return 0;  // 모터 비활성/비상정지 중이면 무시
+        if (cmd->homing_mode != 0) {
+            global_motor_error = ERR_INVALID_CMD;  // 지원하지 않는 homing 모드
+            return 1;                              // 에러 상태 송신
+        }
+
+        global_motor_error = ERR_NONE;      // 새 homing 명령 전 에러 초기화
+        trajectory_cancel_staging();        // 조립 중이던 다축 이동 명령 취소
+        if (cmd->target_axis == HOMING_ALL_AXIS) stepper_start_homing_all();  // 전체 축 원점복귀 시작
+        else if (cmd->target_axis < AXIS_COUNT) stepper_start_homing(cmd->target_axis);  // 지정 축 원점복귀 시작
+        else global_motor_error = ERR_INVALID_CMD;  // 존재하지 않는 축 번호
+        return 1;  // homing 시작 또는 에러 상태 송신
+    }
+
+    // 4. 에러 해제 명령
+    if (cmd->type == CAN_CMD_CLEAR_ERROR) {
+        if (cmd->target_axis != HOMING_ALL_AXIS && cmd->target_axis >= AXIS_COUNT) {
+            global_motor_error = ERR_INVALID_CMD;  // 잘못된 축 번호
+            return 1;                              // 에러 상태 송신
+        }
+
+        global_motor_error = ERR_NONE;       // 에러 코드 초기화
+        trajectory_cancel_staging();         // 에러 중 들어오던 이동 명령 조립 취소
+        if (!global_motor_estop) global_motor_state = STATE_IDLE;  // 비상정지가 아니면 대기 상태로 복귀
+        return 1;                            // 에러 해제 결과 송신
+    }
+
+    // 5. 이동 명령
+    if (cmd->type == CAN_CMD_MOVE) {
+        const TrajectoryPoint *point = &cmd->move;
+        uint8_t execute = (point->flags & 0x08) ? 1 : 0;  // 실행 플래그
+        uint8_t stage_result;
+
+        if (!execute) return 0;  // 실행 플래그가 없으면 무시
+        if (!global_motor_enabled || global_motor_estop) return 0;  // 모터 비활성/비상정지 중이면 무시
+        if (global_motor_error != ERR_NONE) return 0;  // 에러 상태에서는 새 이동 명령 차단
+        if (point->motor_id >= AXIS_COUNT) {
+            trajectory_cancel_staging();          // 잘못된 프레임으로 조립 중인 명령 취소
+            global_motor_error = ERR_INVALID_CMD; // 존재하지 않는 축 번호
+            return 1;                             // 에러 상태 송신
+        }
+        if (!axis[point->motor_id].homing_done) {
+            trajectory_cancel_staging();          // homing 전 이동 명령은 폐기
+            global_motor_error = ERR_INVALID_CMD; // 원점복귀 전 이동 금지
+            return 1;                             // 에러 상태 송신
+        }
+        if (!trajectory_angle_raw_in_limit(point->motor_id, point->target_pos)) {
+            trajectory_cancel_staging();          // 동작 범위 밖 명령은 조립 중인 명령도 폐기
+            global_motor_error = ERR_INVALID_CMD; // 축별 각도 제한 초과
+            return 1;                             // 에러 상태 송신
+        }
+
+        stage_result = trajectory_stage_command(point);  // 축별 프레임을 다축 이동 명령으로 조립
+        if (stage_result == TRAJECTORY_STAGE_INVALID) {
+            global_motor_error = ERR_INVALID_CMD;  // 프레임 순서/플래그/축 번호 오류
+            return 1;                              // 에러 상태 송신
+        }
+        if (stage_result == TRAJECTORY_STAGE_QUEUE_FULL) {
+            global_motor_error = ERR_QUEUE_FULL;  // 궤적 큐가 가득 참
+            return 1;                             // 에러 상태 송신
+        }
+        return 0;  // 정상 이동 명령은 기존처럼 즉시 상태 송신하지 않음
+    }
+
+    return 0;
 }
 
 int main(void)
@@ -64,13 +164,12 @@ int main(void)
 
     __disable_irq();  // 초기화 중 인터럽트 진입 방지
 
-    gpio_init();           // GPIO 입출력 및 대체 기능 설정
+    clock_init_96mhz();    // SYSCLK 96MHz 설정
+    gpio_init();           // GPIO 초기화
     motor_disable();       // 초기 상태에서는 모터 출력 차단
     stepper_init();        // 스텝 모터 상태 변수 초기화
     trajectory_clear();    // 궤적 큐와 목표 위치 초기화
-    systick_init();        // 1ms 시스템 tick 시작
-    tim2_init_10us();      // 스텝 펄스용 10us 타이머 시작
-    tim3_init_1ms();       // 궤적 갱신용 1ms 타이머 시작
+    interrupts_init();     // SysTick, TIM2, TIM3 인터럽트 시작
     spi2_init();           // MCP2515 통신용 SPI2 초기화
     tmc5160_init_all();    // 모든 TMC5160 드라이버 설정
 
@@ -82,21 +181,33 @@ int main(void)
     __enable_irq();                   // 인터럽트 허용
 
     while (1) {
-        uint16_t id;   // 수신 CAN 표준 ID
-        uint8_t data[8];  // 수신 CAN 데이터
-        uint8_t len;   // 수신 CAN 데이터 길이
+        uint16_t id;   // [수신] CAN  ID
+        uint8_t data[8];  // [수신] CAN 데이터
+        uint8_t len;   // [수신] CAN 데이터 길이
+        CanCommand cmd;  // CAN 데이터를 해석해서 만든 내부 명령
 
-        if (GPIO_READ(MCP_INT_PORT, MCP_INT_PIN) == 0U) {
+        // 1. MCP2515가 CAN 메시지를 받았는지 확인
+        if ((MCP_INT_PORT->IDR & (1 << MCP_INT_PIN)) == 0) {
+
+            // 2. MCP2515 수신 버퍼에 남아있는 메시지를 모두 읽음
             while (mcp2515_receive(&id, data, &len)) {
-                can_process_frame(id, data, len);  // 수신한 CAN 명령 처리
+
+                // 3. CAN ID/data를 명령으로 바꾼 뒤 실행
+                if (can_decode_frame(id, data, len, &cmd)) {
+                    if (run_can_command(&cmd)) {
+                        can_send_status();  // 상태 변화/에러는 즉시 송신
+                    }
+                }
             }
         }
 
+        // 4. 다축 이동 명령이 중간에 끊겼는지 확인
         if (trajectory_check_staging_timeout()) {
             can_send_status();  // 다축 명령 조립 타임아웃 발생 시 상태 송신
         }
 
-        if ((global_tick_ms - last_status_ms) >= 100UL) {
+        // 5. 100ms마다 현재 상태를 CAN으로 송신
+        if ((global_tick_ms - last_status_ms) >= 100) {
             last_status_ms = global_tick_ms;  // 상태 송신 기준 시간 갱신
             can_send_status();                // 100ms 주기 상태 프레임 송신
         }

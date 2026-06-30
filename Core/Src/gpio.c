@@ -2,32 +2,32 @@
 
 static void gpio_output(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->MODER &= ~(3UL << (pin * 2U));   // 해당 핀 mode bit 초기화
-    port->MODER |=  (1UL << (pin * 2U));   // general purpose output mode 설정
-    port->OTYPER &= ~(1UL << pin);         // push-pull 출력 설정
-    port->OSPEEDR &= ~(3UL << (pin * 2U)); // 출력 속도 bit 초기화
-    port->OSPEEDR |=  (2UL << (pin * 2U)); // high speed 출력 설정
-    port->PUPDR &= ~(3UL << (pin * 2U));   // pull-up/pull-down 없음
+    port->MODER &= ~(3 << (pin * 2));   // 해당 핀 mode bit 초기화
+    port->MODER |=  (1 << (pin * 2));   // general purpose output mode 설정
+    port->OTYPER &= ~(1 << pin);         // push-pull 출력 설정
+    port->OSPEEDR &= ~(3 << (pin * 2)); // 출력 속도 bit 초기화
+    port->OSPEEDR |=  (2 << (pin * 2)); // high speed 출력 설정
+    port->PUPDR &= ~(3 << (pin * 2));   // pull-up/pull-down 없음
 }
 
 static void gpio_input_pullup(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->MODER &= ~(3UL << (pin * 2U));  // input mode 설정
-    port->PUPDR &= ~(3UL << (pin * 2U));  // pull 설정 bit 초기화
-    port->PUPDR |=  (1UL << (pin * 2U));  // 내부 pull-up 활성화
+    port->MODER &= ~(3 << (pin * 2));  // input mode 설정
+    port->PUPDR &= ~(3 << (pin * 2));  // pull 설정 bit 초기화
+    port->PUPDR |=  (1 << (pin * 2));  // 내부 pull-up 활성화
 }
 
 static void gpio_af5(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->MODER &= ~(3UL << (pin * 2U));   // 해당 핀 mode bit 초기화
-    port->MODER |=  (2UL << (pin * 2U));   // alternate function mode 설정
-    port->OTYPER &= ~(1UL << pin);         // push-pull 출력 설정
-    port->OSPEEDR &= ~(3UL << (pin * 2U)); // 출력 속도 bit 초기화
-    port->OSPEEDR |=  (3UL << (pin * 2U)); // very high speed 설정
-    port->PUPDR &= ~(3UL << (pin * 2U));   // pull 설정 bit 초기화
-    port->PUPDR |=  (1UL << (pin * 2U));   // 내부 pull-up 활성화
-    port->AFR[pin / 8U] &= ~(0xFUL << ((pin % 8U) * 4U));  // alternate function bit 초기화
-    port->AFR[pin / 8U] |=  (0x5UL << ((pin % 8U) * 4U));  // AF5(SPI2) 설정
+    port->MODER &= ~(3 << (pin * 2));   // 해당 핀 mode bit 초기화
+    port->MODER |=  (2 << (pin * 2));   // alternate function mode 설정
+    port->OTYPER &= ~(1 << pin);         // push-pull 출력 설정
+    port->OSPEEDR &= ~(3 << (pin * 2)); // 출력 속도 bit 초기화
+    port->OSPEEDR |=  (3 << (pin * 2)); // very high speed 설정
+    port->PUPDR &= ~(3 << (pin * 2));   // pull 설정 bit 초기화
+    port->PUPDR |=  (1 << (pin * 2));   // 내부 pull-up 활성화
+    port->AFR[pin / 8] &= ~(0xF << ((pin % 8) * 4));  // alternate function bit 초기화
+    port->AFR[pin / 8] |=  (0x5 << ((pin % 8) * 4));  // AF5(SPI2) 설정
 }
 
 void gpio_init(void)
