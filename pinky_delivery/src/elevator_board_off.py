@@ -10,6 +10,7 @@ from sensor_msgs.msg import Image
 from nav2_msgs.srv import LoadMap
 from cv_bridge import CvBridge
 from typing import Optional
+from std_msgs.msg import Int32
 
 import cv2
 
@@ -18,10 +19,7 @@ import cv2
 BOARD_MARKER_ID   = 10          # 탑승용: 캐빈 안쪽 입구 위에 붙인 마커
 FRONT_IMAGE_TOPIC = "/front_camera/image_raw"   # 캐빈 안쪽 BOARD 마커용
 REAR_IMAGE_TOPIC  = "/rear_camera/image_raw"    # 복도 floor-id 마커용
-FLOOR_MAP = {                    # floor-id 마커 → 로드할 맵 (floor_markers.yaml에서 가져오는 게 정석)
-    4: "maps/floor4.yaml",
-    5: "maps/floor5.yaml",
-}
+FLOOR_IDS = [4, 5]
 DRIVE_SPEED       = 0.15         # m/s, 안전하게 느리게
 BOARD_DRIVE_SEC   = 3.0          # 전진 탑승 시간(거리 = 속도×시간). 캐빈 깊이에 맞게
 EXIT_DRIVE_SEC    = 3.0          # 하차 주행 시간
@@ -60,7 +58,7 @@ class ElevatorMVP(Node):
         self.create_subscription(Image, REAR_IMAGE_TOPIC,
                                 lambda m: self.image_cb(m, self.rear_seen),
                                 qos_profile_sensor_data)        
-        self.map_cli = self.create_client(LoadMap, "/map_server/load_map")
+        self.floor_pub = self.create_publisher(Int32, "/floor/arrived", 10)
 
         # 상태 변수
         self.state = WAIT_BOARD
@@ -106,7 +104,7 @@ class ElevatorMVP(Node):
         
         elif self.state == RIDING:
             # 층 이동 후 문이 열리면 바깥 floor-id 마커가 보인다.
-            for floor in FLOOR_MAP:
+            for floor in FLOOR_IDS:
                 marker_id = floor    # 마커 ID = 층번호로 설정
                 if self.stable_seen(self.rear_seen, marker_id):
                     self.target_floor = floor
@@ -123,10 +121,10 @@ class ElevatorMVP(Node):
                 self.drive(linear=-DRIVE_SPEED) # 후진속도
             else:
                 self.stop()
-                self.load_map(FLOOR_MAP[self.target_floor])  # 하차 직후 해당 층 맵 로드
+                self.floor_pub.publish(Int32(data=self.target_floor))
                 # TODO(다음 단계): 저장된 출구 pose를 /initialpose로 publish → AMCL seed
                 self.state = DONE
-                self.get_logger().info("하차 완료 + 맵 로드 요청 → DONE")
+                self.get_logger().info(f"하차 완료 → /floor/arrived={self.target_floor} → DONE")
 
         elif self.state == DONE:
             self.stop()
@@ -140,20 +138,6 @@ class ElevatorMVP(Node):
 
     def stop(self):
         self.cmd_pub.publish(Twist())  # 전부 0
-
-    def load_map(self, map_url):
-        if not self.map_cli.service_is_ready():
-            self.get_logger().warn("/map_server/load_map 서비스 없음")
-            return
-        req = LoadMap.Request()
-        req.map_url = map_url                          # 맵 yaml 경로
-        future = self.map_cli.call_async(req)
-        future.add_done_callback(self._on_map_loaded)
-
-    def _on_map_loaded(self, future):
-        res = future.result()
-        ok = (res is not None and res.result == LoadMap.Response.RESULT_SUCCESS)
-        self.get_logger().info(f"맵 로드 결과: {'성공' if ok else '실패'}")
 
 
 def main():
