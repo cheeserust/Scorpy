@@ -42,18 +42,18 @@
 #define MOTOR_EN_PIN  3
 
 #define LIM1_PORT GPIOA
-#define LIM1_PIN  2
+#define LIM1_PIN  7
 #define LIM2_PORT GPIOA
-#define LIM2_PIN  3
-#define LIM3_PORT GPIOA
-#define LIM3_PIN  9
-#define LIM4_PORT GPIOA
-#define LIM4_PIN  10
+#define LIM2_PIN  15
+#define LIM3_PORT GPIOB
+#define LIM3_PIN  4
+#define LIM4_PORT GPIOB
+#define LIM4_PIN  12
 
-#define MCP_CS_PORT   GPIOB
-#define MCP_CS_PIN    12
-#define MCP_INT_PORT  GPIOB
-#define MCP_INT_PIN   4
+#define MCP_CS_PORT   GPIOA
+#define MCP_CS_PIN    9
+#define MCP_INT_PORT  GPIOA
+#define MCP_INT_PIN   10
 #define MCP_SCK_PORT  GPIOB
 #define MCP_SCK_PIN   13
 #define MCP_MISO_PORT GPIOB

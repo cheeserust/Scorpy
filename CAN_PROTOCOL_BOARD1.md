@@ -5,21 +5,21 @@
 서버/RPi 쪽에서는 `board_id`로 대상 보드를 고르고, 실제 CAN frame에는 아래 CAN ID를 사용합니다.
 payload에는 별도 Board ID를 넣지 않습니다.
 
-| Board ID | 대상 | Move CAN ID | Status CAN ID | Payload Motor ID |
-|---:|---|---:|---:|---|
-| `1` | Board1, 1~4축 | `0x101` | `0x201` | `0~3` |
-| `2` | Board2, 5축 | `0x102` | `0x202` | `0` |
-| `3` | Board3, 서보 9개 | `0x103` | `0x203` | `0~8` |
+| Board ID | 대상 | Move CAN ID | Status CAN ID | Position Feedback CAN ID | Payload Motor ID |
+|---:|---|---:|---:|---:|---|
+| `1` | Board1, 팔 2~5축 | `0x101` | `0x201` | `0x301` | `0~3` |
+| `2` | Board2, 베이스 1축 | `0x102` | `0x202` | `0x302` | `0` |
+| `3` | Board3, 서보 9개 | `0x103` | `0x203` | `0x303` | `0~8` |
 
 서버 내부의 global joint id와 CAN payload의 Motor ID는 분리합니다.
 
 | Global Joint ID | 실제 축 | Board ID | Move CAN ID | Payload Motor ID |
 |---:|---|---:|---:|---:|
-| `0` | 1축 | `1` | `0x101` | `0` |
-| `1` | 2축 | `1` | `0x101` | `1` |
-| `2` | 3축 | `1` | `0x101` | `2` |
-| `3` | 4축 | `1` | `0x101` | `3` |
-| `4` | 5축 | `2` | `0x102` | `0` |
+| `0` | 베이스 1축 | `2` | `0x102` | `0` |
+| `1` | 팔 2축 | `1` | `0x101` | `0` |
+| `2` | 팔 3축 | `1` | `0x101` | `1` |
+| `3` | 팔 4축 | `1` | `0x101` | `2` |
+| `4` | 팔 5축 | `1` | `0x101` | `3` |
 | `5` | 서보 1 | `3` | `0x103` | `0` |
 | `6` | 서보 2 | `3` | `0x103` | `1` |
 | `7` | 서보 3 | `3` | `0x103` | `2` |
@@ -30,7 +30,7 @@ payload에는 별도 Board ID를 넣지 않습니다.
 | `12` | 서보 8 | `3` | `0x103` | `7` |
 | `13` | 서보 9 | `3` | `0x103` | `8` |
 
-즉 Board2 5축 명령은 `CAN ID=0x102`, `Motor ID=0`으로 보냅니다.
+즉 Board2 베이스 명령은 `CAN ID=0x102`, `Motor ID=0`으로 보냅니다.
 Board3 서보 명령은 `CAN ID=0x103`, `Motor ID=0~8`로 보냅니다.
 
 ## 2. Arm Joint Limits and Home Position
@@ -39,14 +39,14 @@ Board3 서보 명령은 `CAN ID=0x103`, `Motor ID=0~8`로 보냅니다.
 
 | Joint | Board ID | Payload Motor ID | Min deg | Max deg | Home deg | Min raw | Max raw | Home raw |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `base_joint` | `1` | `0` | `-90` | `180` | `-90` | `-9000` | `18000` | `-9000` |
-| `arm_joint_1` | `1` | `1` | `-90` | `90` | `-90` | `-9000` | `9000` | `-9000` |
-| `arm_joint_2` | `1` | `2` | `-80` | `80` | `-80` | `-8000` | `8000` | `-8000` |
-| `arm_joint_3` | `1` | `3` | `-90` | `90` | `-90` | `-9000` | `9000` | `-9000` |
-| `arm_joint_4` | `2` | `0` | `-170` | `170` | `-170` | `-17000` | `17000` | `-17000` |
+| `base_joint` | `2` | `0` | `-90` | `180` | `-90` | `-9000` | `18000` | `-9000` |
+| `arm_joint_1` / 팔 2축 | `1` | `0` | `-90` | `90` | `-90` | `-9000` | `9000` | `-9000` |
+| `arm_joint_2` / 팔 3축 | `1` | `1` | `-80` | `80` | `-80` | `-8000` | `8000` | `-8000` |
+| `arm_joint_3` / 팔 4축 | `1` | `2` | `-90` | `90` | `-90` | `-9000` | `9000` | `-9000` |
+| `arm_joint_4` / 팔 5축 | `1` | `3` | `-170` | `170` | `-170` | `-17000` | `17000` | `-17000` |
 
-Board1 펌웨어는 `base_joint`부터 `arm_joint_3`까지 4축 limit/home을 적용합니다.
-Board2 펌웨어는 `arm_joint_4` limit/home을 같은 방식으로 적용합니다.
+Board1 펌웨어는 팔 2~5축 4개 축의 limit/home을 적용합니다.
+Board2 펌웨어는 베이스 1축 limit/home을 같은 방식으로 적용합니다.
 
 ## 3. Board1 CAN ID
 
@@ -58,8 +58,9 @@ Board2 펌웨어는 `arm_joint_4` limit/home을 같은 방식으로 적용합니
 | `0x030` | RPi -> STM32 | Clear Error |
 | `0x101` | RPi -> STM32 | Board1 motor trajectory point |
 | `0x201` | STM32 -> RPi | Board1 status response |
+| `0x301` | STM32 -> RPi | Board1 current position feedback |
 
-Board1은 `0x101` 위치 명령에서 Motor ID `0~3`만 처리합니다.
+Board1은 `0x101` 위치 명령에서 Motor ID `0~3`만 처리합니다. Board1 local Motor ID `0~3`은 실제 팔 `2~5축`입니다.
 
 MoveIt2 trajectory point 하나는 Motor ID `0 -> 1 -> 2 -> 3` 순서의 네 CAN frame으로 전송해야 합니다. STM32는 네 frame을 staging한 뒤 하나의 4축 point로 queue에 넣고, 4축 segment를 같은 1ms tick에서 동시에 시작합니다.
 
@@ -71,12 +72,13 @@ MoveIt2 trajectory point 하나는 Motor ID `0 -> 1 -> 2 -> 3` 순서의 네 CAN
 | `0x010` | RPi -> STM32 | Enable / Disable |
 | `0x020` | RPi -> STM32 | Homing Start |
 | `0x030` | RPi -> STM32 | Clear Error |
-| `0x102` | RPi -> STM32 | Board2 motor trajectory point |
+| `0x102` | RPi -> STM32 | Board2 base motor trajectory point |
 | `0x202` | STM32 -> RPi | Board2 status response |
+| `0x302` | STM32 -> RPi | Board2 current position feedback |
 
 Board2는 `0x102` 위치 명령에서 Motor ID `0`만 처리합니다.
 
-Board2는 5축 단일 축 보드로 사용합니다. 서버의 global joint id는 `4`이지만, CAN payload 안에서는 Board2 로컬 Motor ID `0`으로 보냅니다.
+Board2는 베이스 1축 단일 축 보드로 사용합니다. 서버의 global joint id는 `0`이지만, CAN payload 안에서는 Board2 로컬 Motor ID `0`으로 보냅니다.
 
 Board2는 한 trajectory point당 CAN frame 하나만 전송하면 됩니다.
 
@@ -89,6 +91,7 @@ Board2는 한 trajectory point당 CAN frame 하나만 전송하면 됩니다.
 | `0x030` | RPi -> STM32 | Clear Error |
 | `0x103` | RPi -> STM32 | Board3 servo command |
 | `0x203` | STM32 -> RPi | Board3 status response |
+| `0x303` | STM32 -> RPi | Board3 current position feedback |
 
 Board3는 `0x103` 명령에서 Motor ID `0~8`로 서보 1~9번을 구분합니다.
 
@@ -123,8 +126,8 @@ Exec Rel  Step Rsv  | Motor ID
 | Bit | 이름 | 의미 |
 |---:|---|---|
 | 7 | Execute | `1`: 명령 실행/queue push, `0`: 무시 |
-| 6 | Relative | MoveIt2 Bridge에서는 `0` 고정. `1`은 invalid |
-| 5 | Step Mode | MoveIt2 Bridge에서는 `0` 고정. Target Pos는 0.01도 단위 angle |
+| 6 | Relative | `1`: 현재 위치 기준 상대 이동 |
+| 5 | Step Mode | `0`: Target Pos는 0.01도 단위 angle, `1`: Target Pos는 step |
 | 4 | Reserved | 현재 미사용, `0` |
 | 3~0 | Motor ID | Board1은 `0~3`, Board2는 `0`만 유효 |
 
@@ -151,29 +154,27 @@ uint8_t step_mode = (flags & 0x02) ? 1 : 0;
 
 ### Target Pos (Byte 1~4)
 
-MoveIt2 Bridge 경로에서는 angle만 사용합니다.
-
 | Step Mode | Target Pos 의미 |
 |---:|---|
 | `0` | 0.01도 단위 angle. 예: `3000` = `30.00 deg` |
-| `1` | 현재 4축 staging 경로에서는 invalid |
+| `1` | step 수 |
 
 angle mode에서 STM32는 아래 정수 공식으로 step 변환합니다.
 
 ```c
-step = angle_raw * gear_ratio[axis] * 200 * 16 / 36000;
+step = angle_raw * gear_ratio[axis] * motor_steps_per_rev[axis] * 16 / 36000;
 ```
 
 현재 Board1 gear ratio:
 
-| Axis / Motor ID | Gear ratio |
-|---:|---:|
-| 0 | 20 |
-| 1 | 20 |
-| 2 | 75 |
-| 3 | 30 |
+| Board1 Motor ID | 실제 축 | Gear ratio | Motor full steps/rev |
+|---:|---:|---:|---:|
+| 0 | 2축 | 20 | 200 |
+| 1 | 3축 | 50 | 200 |
+| 2 | 4축 | 30 | 200 |
+| 3 | 5축 | 120 | 48 |
 
-Board2 gear ratio는 5축 기구 사양에 맞춰 Board2 펌웨어에서 별도로 정의합니다.
+Board2 베이스 gear ratio는 `20`입니다. 베이스 모터가 일반 1.8도 스텝모터이면 `motor_steps_per_rev=200`으로 둡니다.
 
 ### Speed (Byte 5~6)
 
@@ -225,7 +226,7 @@ Motor 0을 30.00도로 50ms 동안 이동:
 
 안 움직이는 축도 생략하지 말고 해당 point의 목표 위치를 그대로 보내야 합니다. `0`을 보내면 0도로 이동하라는 의미입니다.
 
-Board2 5축을 30.00도로 50ms 동안 이동:
+Board2 베이스를 30.00도로 50ms 동안 이동:
 
 | Byte | 값 |
 |---:|---:|
@@ -323,26 +324,28 @@ Enable 수신 시 STM32는 ESTOP flag와 error를 해제하고 공통 motor enab
 
 Disable 수신 시 STM32는 queue clear, step 정지, motor disable을 수행합니다.
 
-### Homing Start, CAN ID `0x020`
+### Arm Homing Broadcast, CAN ID `0x020`
 
 | Byte | 필드 | 값 |
 |---:|---|---|
-| 0 | Motor ID | Board1은 `0~3`, Board2는 `0`, 또는 전체 축 `255` |
+| 0 | Target Motor | `0xFF`: arm 전체 homing |
 | 1 | Homing Mode | 현재 `0`만 사용 |
 
 조건:
 
-- Enable 상태가 아니면 무시합니다.
-- ESTOP 상태이면 무시합니다.
+- Board1 팔 축과 Board2 베이스 축이 동시에 처리하는 전체 스텝모터 homing broadcast입니다.
+- payload에는 Target Board를 넣지 않습니다.
+- 현재 최종 기준에서는 `Byte0 = 0xFF`만 사용합니다.
+- Enable 상태가 아니거나 ESTOP 상태이면 `ERR_INVALID_CMD`로 처리합니다.
 - mode가 `0`이 아니면 `ERR_INVALID_CMD`로 처리합니다.
 
-Homing 완료 시 해당 축의 `current_step`과 `target_step`은 0으로 설정되고 `homing_done`이 1이 됩니다.
+Homing 완료 시 Board1은 local motor 0~3의 `homing_done`을 1로 설정하고 status의 Homing Done Bits bit0~3으로 보고합니다.
 
-### Clear Error, CAN ID `0x030`
+### Clear Error Broadcast, CAN ID `0x030`
 
 | Byte | 필드 | 값 |
 |---:|---|---|
-| 0 | Motor ID | Board1은 `0~3`, Board2는 `0`, 또는 전체 `255` |
+| 0 | Target Motor | `0xFF`: 전체 error clear |
 
 현재 구현에서는 error code를 `ERR_NONE`으로 초기화합니다. ESTOP 자체는 Clear Error만으로 해제하지 않고, `0x010 Enable=1`에서 해제합니다.
 
@@ -377,6 +380,7 @@ STM32는 100ms마다 status를 송신하고, ESTOP/Enable/Homing/Clear Error/Que
 | 3 | `STATE_MOVING` |
 | 4 | `STATE_ERROR` |
 | 5 | `STATE_ESTOP` |
+| 6 | `STATE_DISABLED` |
 
 ### Error Codes
 
@@ -384,13 +388,72 @@ STM32는 100ms마다 status를 송신하고, ESTOP/Enable/Homing/Clear Error/Que
 |---:|---|---|
 | 0 | `ERR_NONE` | 정상 |
 | 1 | `ERR_INVALID_CMD` | 잘못된 명령, motor id, homing 전 move 등 |
-| 2 | `ERR_LIMIT_DETECTED` | 예약됨 |
+| 2 | `ERR_LIMIT_SWITCH_DETECTED` | 예약됨 |
 | 3 | `ERR_DRIVER_FAULT` | MCP2515 init 실패 등 driver fault |
 | 4 | `ERR_HOMING_FAIL` | 예약됨 |
 | 5 | `ERR_QUEUE_FULL` | trajectory queue full, 새 명령 drop |
 | 6 | `ERR_RESERVED` | 예약됨 |
 
-## 10. Queue and Error Policy
+## 10. STM32 -> RPi Current Position Feedback, CAN ID `0x301` / `0x302` / `0x303`
+
+기존 `0x201` / `0x202` / `0x203` status frame은 그대로 유지합니다. MoveIt2 `/joint_states`의 actual position 입력을 위해 별도 current position feedback frame을 추가합니다.
+
+Board1 펌웨어는 100ms 주기 status 송신 직후 `0x301` frame을 local motor `0 -> 1 -> 2 -> 3` 순서로 4개 송신합니다.
+
+| Board ID | Position Feedback CAN ID | 송신 frame |
+|---:|---:|---|
+| `1` | `0x301` | Board1 local motor `0~3`, 4 frames |
+| `2` | `0x302` | Board2 local motor `0`, 1 frame |
+| `3` | `0x303` | Board3 local motor `0~8`, 9 frames |
+
+DLC는 8입니다.
+
+| Byte | 필드 | 자료형 | 설명 |
+|---:|---|---|---|
+| 0 | Local Motor ID | `uint8_t` | 해당 보드 기준 local motor id |
+| 1 | Flags | `uint8_t` | position valid / homed / moving / target reached |
+| 2 | Current Pos LSB | `int32_t` 일부 | little endian |
+| 3 | Current Pos | `int32_t` 일부 | little endian |
+| 4 | Current Pos | `int32_t` 일부 | little endian |
+| 5 | Current Pos MSB | `int32_t` 일부 | little endian |
+| 6 | Error / Fault Code | `uint8_t` | error code, 없으면 `0` |
+| 7 | Sequence Counter | `uint8_t` | 송신 순서 확인용 counter |
+
+### Position Feedback Flags, Byte 1
+
+| Bit | 이름 | 의미 |
+|---:|---|---|
+| 0 | Position Valid | `1`: current position 값을 MoveIt2 actual position으로 사용 가능 |
+| 1 | Homed / Ready | `1`: homing 완료 또는 servo ready |
+| 2 | Moving | `1`: 이동 또는 homing 중 |
+| 3 | Target Reached | `1`: 목표 위치 도달 |
+| 4~7 | Reserved | 현재 `0` |
+
+`current_pos_001deg`는 모터 step 값이 아니라 중앙서버 / MoveIt2 joint 기준 출력축 각도입니다. 단위는 command `target_pos`와 같은 0.01도입니다.
+
+```text
+30.00 deg  -> 3000
+-15.50 deg -> -1550
+```
+
+Board1 STM32 내부 변환은 현재 step position을 출력축 각도로 역변환합니다.
+
+```c
+current_pos_001deg = current_step * 36000 / (gear_ratio[motor_id] * motor_steps_per_rev[motor_id] * 16);
+```
+
+Board1 예시:
+
+```text
+CAN ID = 0x301
+Byte0 = 0
+Byte1 = 0x0B  // valid + homed + target reached
+Byte2~5 = 3000 = B8 0B 00 00
+Byte6 = 0
+Byte7 = sequence counter
+```
+
+## 11. Queue and Error Policy
 
 Board1 STM32 trajectory queue는 외부 status 기준으로 32개의 `0x101` command slot입니다. 내부 구현은 4축 point queue 8개이며, 한 4축 point가 command slot 4개를 사용합니다.
 
@@ -409,14 +472,14 @@ Board1 staging 규칙:
 - Motor ID는 반드시 `0 -> 1 -> 2 -> 3` 순서여야 합니다.
 - 첫 frame 수신 후 20ms 안에 네 frame이 모두 들어와야 합니다.
 - 네 frame의 Duration은 모두 같아야 합니다.
-- Execute=1, Relative=0, StepMode=0, Reserved=0이어야 합니다.
+- Execute=1, Reserved=0이어야 합니다. Relative와 Step Mode는 Byte0 정의에 따라 해석합니다.
 - 위 조건을 만족하지 않으면 staging을 폐기하고 `ERR_INVALID_CMD`를 즉시 보고합니다.
 
 Board2 staging 규칙:
 
 - 한 point당 `0x102` frame 하나만 사용합니다.
 - Motor ID는 `0`이어야 합니다.
-- Execute=1, Relative=0, StepMode=0, Reserved=0이어야 합니다.
+- Execute=1, Reserved=0이어야 합니다. Relative와 Step Mode는 Byte0 정의에 따라 해석합니다.
 - 위 조건을 만족하지 않으면 `ERR_INVALID_CMD`를 즉시 보고합니다.
 
 Board3 command 규칙:
@@ -434,18 +497,18 @@ Board3 command 규칙:
 4. queue를 비운 뒤 다시 시작하려면 Enable/Homing/trajectory 재동기화
 5. `0x030 Clear Error` 후 재전송
 
-## 11. STM32 Implementation Summary
+## 12. STM32 Implementation Summary
 
 현재 STM32 쪽에 구현된 내용:
 
 - MCP2515 SPI2 기반 CAN 송수신
-- CAN ID `0x001`, `0x010`, `0x020`, `0x030`, `0x101`, `0x201`
+- CAN ID `0x001`, `0x010`, `0x020`, `0x030`, `0x101`, `0x201`, `0x301`
 - `0x101` 위치 명령 4개를 staging 후 4축 trajectory point queue push
 - Queue full Drop Tail 및 즉시 status 응답
 - TIM3 1ms trajectory 선형 보간
 - TIM2 10us STEP/DIR pulse 생성
 - Homing 및 limit switch debounce
-- 100ms 주기 status 송신
+- 100ms 주기 status 및 current position feedback 송신
 - PC용 간단 프로토콜 테스트 `board1_virtual_can_test.c`
 
 아직 초기 구현에서 제한적으로 처리하는 내용:
@@ -458,10 +521,11 @@ Board2 펌웨어를 만들 때 Board1 구현에서 바꿀 핵심:
 
 - 위치 명령 CAN ID를 `0x102`로 변경
 - 상태 응답 CAN ID를 `0x202`로 변경
+- 현재 위치 feedback CAN ID를 `0x302`로 변경
 - 축 개수를 1개로 축소
 - 유효 Motor ID를 `0`만 허용
 - Board1의 4축 staging 로직 제거
-- 5축 gear ratio, STEP/DIR/EN/LIMIT pin을 Board2 하드웨어에 맞게 정의
+- 베이스 gear ratio, STEP/DIR/EN/LIMIT pin을 Board2 하드웨어에 맞게 정의
 
 Board3 펌웨어를 만들 때 정해야 할 핵심:
 

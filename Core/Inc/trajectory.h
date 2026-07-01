@@ -8,8 +8,9 @@ void trajectory_cancel_staging(void);
 uint8_t trajectory_stage_command(const TrajectoryPoint *point);
 uint8_t trajectory_check_staging_timeout(void);
 uint8_t trajectory_free_count(void);
-void trajectory_update_1ms(void);
+void trajectory_1ms_interrupt(void);
 int32_t trajectory_angle_raw_to_step(uint8_t axis_id, int32_t angle_raw);
+int32_t step_to_angle(uint8_t axis_id, int32_t step);
 int32_t trajectory_axis_home_raw(uint8_t axis_id);
 uint8_t trajectory_angle_raw_in_limit(uint8_t axis_id, int32_t angle_raw);
 

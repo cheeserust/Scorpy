@@ -27,6 +27,7 @@ void system_update_state(void)
 {
     if (global_motor_estop) global_motor_state = STATE_ESTOP;
     else if (global_motor_error != ERR_NONE) global_motor_state = STATE_ERROR;
+    else if (!global_motor_enabled) global_motor_state = STATE_DISABLED;
     else if (any_axis_homing()) global_motor_state = STATE_HOMING;
     else if (any_axis_moving()) global_motor_state = STATE_MOVING;
     else global_motor_state = STATE_IDLE;

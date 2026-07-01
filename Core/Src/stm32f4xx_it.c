@@ -58,22 +58,32 @@ void SysTick_Handler(void)
     global_tick_ms++;  // 시스템 기준 시간(ms) 증가, 메인에서 100ms마다 상태 송신할 사용
 }
 
+// 10us
 void TIM2_IRQHandler(void)
 {   
     // Update interrupt flag This bit is set by hardware on an update event. It is cleared by software.
     if (TIM2->SR & (1 << 0)) {
         TIM2->SR &= ~(1 << 0);  // UIF clear: 0쓰면 update interrupt flag 초기화
-        if (!global_motor_estop && global_motor_enabled) stepper_update_10us();  // 10us 주기로 스텝 펄스 갱신
-        else stepper_stop_all();  // 비상정지/비활성 상태에서는 모든 축 정지
+
+        // 모터가 estop 아니고, enable이면 실행
+        if (!global_motor_estop && global_motor_enabled) 
+        {
+            stepper_10us_interrupt();  // 10us 주기로 스텝 펄스 생성
+        }
+        else
+        {
+            stepper_stop_all();  // 비상정지/비활성 상태에서는 모든 축 정지
+        }
     }
 }
 
+// 1ms
 void TIM3_IRQHandler(void)
 {
     if (TIM3->SR & (1 << 0)) {
         TIM3->SR &= ~(1 << 0);  // UIF clear: update interrupt flag 초기화
         if (!global_motor_estop && global_motor_enabled && global_motor_error == ERR_NONE) {
-            trajectory_update_1ms();  // 1ms 주기로 궤적 보간 목표 위치 갱신
+            trajectory_1ms_interrupt();  // 1ms 주기로 궤적 보간 목표 위치 갱신
         }
     }
 }

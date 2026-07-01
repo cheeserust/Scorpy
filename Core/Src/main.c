@@ -85,36 +85,44 @@ static uint8_t run_can_command(const CanCommand *cmd)
             trajectory_clear();        // 남아있는 이동 명령 제거
             stepper_stop_all();        // 진행 중인 스텝 출력 정지
             motor_disable();           // 모터 드라이버 출력 차단
+            global_motor_state = STATE_DISABLED;  // disable 상태로 보고
         }
         return 1;  // enable 처리 결과 송신
     }
 
     // 3. 원점복귀 명령
     if (cmd->type == CAN_CMD_HOMING) {
-        if (!global_motor_enabled || global_motor_estop) return 0;  // 모터 비활성/비상정지 중이면 무시
+        if (!global_motor_enabled || global_motor_estop) {
+            global_motor_error = ERR_INVALID_CMD;  // enable 전 또는 ESTOP 중 homing은 잘못된 명령
+            return 1;
+        }
         if (cmd->homing_mode != 0) {
             global_motor_error = ERR_INVALID_CMD;  // 지원하지 않는 homing 모드
             return 1;                              // 에러 상태 송신
         }
+        if (cmd->target_axis != HOMING_ALL_AXIS) {
+            global_motor_error = ERR_INVALID_CMD;  // 최종 프로토콜은 arm 전체 homing만 허용
+            return 1;
+        }
 
         global_motor_error = ERR_NONE;      // 새 homing 명령 전 에러 초기화
         trajectory_cancel_staging();        // 조립 중이던 다축 이동 명령 취소
-        if (cmd->target_axis == HOMING_ALL_AXIS) stepper_start_homing_all();  // 전체 축 원점복귀 시작
-        else if (cmd->target_axis < AXIS_COUNT) stepper_start_homing(cmd->target_axis);  // 지정 축 원점복귀 시작
-        else global_motor_error = ERR_INVALID_CMD;  // 존재하지 않는 축 번호
+        stepper_start_homing_all();         // 전체 축 원점복귀 시작
         return 1;  // homing 시작 또는 에러 상태 송신
     }
 
     // 4. 에러 해제 명령
     if (cmd->type == CAN_CMD_CLEAR_ERROR) {
-        if (cmd->target_axis != HOMING_ALL_AXIS && cmd->target_axis >= AXIS_COUNT) {
-            global_motor_error = ERR_INVALID_CMD;  // 잘못된 축 번호
+        if (cmd->target_axis != HOMING_ALL_AXIS) {
+            global_motor_error = ERR_INVALID_CMD;  // 최종 프로토콜은 전체 error clear만 허용
             return 1;                              // 에러 상태 송신
         }
 
         global_motor_error = ERR_NONE;       // 에러 코드 초기화
         trajectory_cancel_staging();         // 에러 중 들어오던 이동 명령 조립 취소
-        if (!global_motor_estop) global_motor_state = STATE_IDLE;  // 비상정지가 아니면 대기 상태로 복귀
+        if (!global_motor_estop) {
+            global_motor_state = global_motor_enabled ? STATE_IDLE : STATE_DISABLED;  // enable 상태에 맞게 복귀
+        }
         return 1;                            // 에러 해제 결과 송신
     }
 
@@ -137,12 +145,6 @@ static uint8_t run_can_command(const CanCommand *cmd)
             global_motor_error = ERR_INVALID_CMD; // 원점복귀 전 이동 금지
             return 1;                             // 에러 상태 송신
         }
-        if (!trajectory_angle_raw_in_limit(point->motor_id, point->target_pos)) {
-            trajectory_cancel_staging();          // 동작 범위 밖 명령은 조립 중인 명령도 폐기
-            global_motor_error = ERR_INVALID_CMD; // 축별 각도 제한 초과
-            return 1;                             // 에러 상태 송신
-        }
-
         stage_result = trajectory_stage_command(point);  // 축별 프레임을 다축 이동 명령으로 조립
         if (stage_result == TRAJECTORY_STAGE_INVALID) {
             global_motor_error = ERR_INVALID_CMD;  // 프레임 순서/플래그/축 번호 오류
@@ -210,6 +212,7 @@ int main(void)
         if ((global_tick_ms - last_status_ms) >= 100) {
             last_status_ms = global_tick_ms;  // 상태 송신 기준 시간 갱신
             can_send_status();                // 100ms 주기 상태 프레임 송신
+            can_send_position_feedback_all(); // 100ms 주기 현재 위치 피드백 송신
         }
     }
 }

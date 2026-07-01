@@ -24,7 +24,7 @@ static void tmc_cs_high(uint8_t axis_id)
 
 static void tmc5160_write(uint8_t axis_id, uint8_t addr, uint32_t data)
 {
-    uint8_t tx[5];  // TMC5160 write frame: 주소 1바이트 + 데이터 4바이트
+    uint8_t tx[5];  //주소 1바이트 + 데이터 4바이트
 
     if (axis_id >= AXIS_COUNT) return;  // 잘못된 축 번호는 무시
     

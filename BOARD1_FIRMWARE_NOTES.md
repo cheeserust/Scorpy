@@ -2,7 +2,7 @@
 
 ## 포함 기능
 
-- 1~4축 STEP/DIR 제어
+- 팔 2~5축 STEP/DIR 제어
 - TMC5160 Software SPI 초기 설정
 - MCP2515 SPI2 CAN 수신/송신
 - 리밋스위치 Homing
@@ -15,8 +15,35 @@
 | SCK | PB13 |
 | SO / MISO | PB14 |
 | SI / MOSI | PB15 |
-| CS | PB12 |
-| INT | PB4 |
+| CS | PA9 |
+| INT | PA10 |
+
+## UART2 TTL 핀
+
+| 기능 | 핀 |
+|---|---|
+| TX2 | PA2 |
+| RX2 | PA3 |
+
+## 리밋스위치 핀
+
+| 축 | 핀 |
+|---|---|
+| LIM1 | PA7 |
+| LIM2 | PA15 |
+| LIM3 | PB4 |
+| LIM4 | PB12 |
+
+## Board1 축 매핑과 감속비
+
+| Board1 Motor ID | 실제 축 | 감속비 | 모터 full steps/rev |
+|---:|---:|---:|---:|
+| 0 | 2축 | 20 | 200 |
+| 1 | 3축 | 50 | 200 |
+| 2 | 4축 | 30 | 200 |
+| 3 | 5축 | 120 | 48 |
+
+Board2는 베이스 1축을 담당하며 감속비는 20입니다.
 
 ## CAN ID
 
@@ -26,15 +53,15 @@
 | 0x010 | Enable / Disable |
 | 0x020 | Homing Start |
 | 0x030 | Clear Error |
-| 0x101 | Board1 Axis Move |
+| 0x101 | Board1 Arm Axis Move |
 | 0x201 | Board1 Status |
 
 ## 주의
 
 1. MCP2515 모듈의 크리스탈이 16MHz인지 확인하세요. 8MHz면 코드의 CNF 값을 바꿔야 합니다.
 2. TMC5160 전류 설정값은 테스트용으로 낮게 넣었습니다. 실제 모터/Rsense에 맞게 조정해야 합니다.
-3. PB3, PB4는 JTAG 관련 기능과 겹칠 수 있습니다. SWD만 쓰는 환경에서 테스트하세요.
-4. PC14/PC15는 고속 출력에 약하므로 2축 STEP 속도는 낮은 속도부터 테스트하세요.
+3. PA15, PB3, PB4는 JTAG 관련 기능과 겹칠 수 있습니다. SWD만 쓰는 환경에서 테스트하세요.
+4. PC14/PC15는 고속 출력에 약하므로 Board1 Motor ID 1 축 STEP 속도는 낮은 속도부터 테스트하세요.
 5. 리밋스위치는 `입력핀 - 스위치 - GND` 방식이며 내부 Pull-up을 사용합니다.
 
 ## CAN 명령 예시
@@ -55,7 +82,7 @@ ID: 0x020
 |---|---|
 | 255 | 0 |
 
-### 1축 30도 이동
+### 팔 2축 30도 이동
 
 ID: 0x101
 

@@ -7,7 +7,6 @@
 #define SYSCLK_HZ                (96 * 1000 * 1000) // 96 MHz
 
 #define AXIS_COUNT               4
-#define MOTOR_STEPS_PER_REV      200
 #define MICROSTEP                16
 #define TRAJECTORY_QUEUE_SIZE    32
 #define MULTI_AXIS_QUEUE_SIZE    (TRAJECTORY_QUEUE_SIZE / AXIS_COUNT)
@@ -19,6 +18,7 @@
 #define CAN_ID_CLEAR_ERROR       0x030
 #define CAN_ID_BOARD1_MOVE       0x101
 #define CAN_ID_BOARD1_STAT       0x201
+#define CAN_ID_BOARD1_POS        0x301
 
 #define STATE_INIT               0
 #define STATE_IDLE               1
@@ -26,18 +26,19 @@
 #define STATE_MOVING             3
 #define STATE_ERROR              4
 #define STATE_ESTOP              5
+#define STATE_DISABLED           6
 
 #define ERR_NONE                 0
 #define ERR_INVALID_CMD          1
-#define ERR_LIMIT_DETECTED       2
+#define ERR_LIMIT_SWITCH_DETECTED 2
 #define ERR_DRIVER_FAULT         3
 #define ERR_HOMING_FAIL          4
 #define ERR_QUEUE_FULL           5
 #define ERR_RESERVED             6
 
 #define HOMING_ALL_AXIS          255
-#define LIMIT_ACTIVE_LEVEL       0
-#define LIMIT_DEBOUNCE_TICKS     500
+#define LIMIT_SWITCH_ACTIVE_LEVEL 0
+#define LIMIT_SWITCH_DEBOUNCE_TICKS 500
 #define HOMING_INTERVAL_TICKS    300
 
 #define DIR_POSITIVE             1
@@ -71,6 +72,7 @@ typedef struct {
 typedef struct {
     int32_t target_pos[AXIS_COUNT];
     uint16_t speed[AXIS_COUNT];
+    uint8_t flags[AXIS_COUNT];
     uint8_t duration_5ms;
 } MultiAxisTrajectoryPoint;
 

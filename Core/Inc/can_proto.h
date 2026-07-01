@@ -20,6 +20,8 @@ typedef struct {
 } CanCommand;
 
 void can_send_status(void);
+void can_send_position_feedback(uint8_t motor_id);
+void can_send_position_feedback_all(void);
 uint8_t can_decode_frame(uint16_t id, const uint8_t *data, uint8_t len, CanCommand *cmd);
 
 #endif
