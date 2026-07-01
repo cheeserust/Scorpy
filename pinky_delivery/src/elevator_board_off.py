@@ -20,11 +20,11 @@ BOARD_MARKER_ID   = 10          # 탑승용: 캐빈 안쪽 입구 위에 붙인 
 FRONT_IMAGE_TOPIC = "/front_camera/image_raw"   # 캐빈 안쪽 BOARD 마커용
 REAR_IMAGE_TOPIC  = "/rear_camera/image_raw"    # 복도 floor-id 마커용
 FLOOR_IDS = [4, 5]
-DRIVE_SPEED       = 0.15         # m/s, 안전하게 느리게
-BOARD_DRIVE_SEC   = 3.0          # 전진 탑승 시간(거리 = 속도×시간). 캐빈 깊이에 맞게
-EXIT_DRIVE_SEC    = 3.0          # 하차 주행 시간
+DRIVE_SPEED       = 0.3         # m/s, 안전하게 느리게
+BOARD_DRIVE_SEC   = 7.0          # 전진 탑승 시간(거리 = 속도×시간). 캐빈 깊이에 맞게
+EXIT_DRIVE_SEC    = 7.0          # 하차 주행 시간
 
-DEBOUNCE_FRAMES   = 45            # 마커가 N프레임 연속 보여야 "진짜 보임"으로 인정 (오검출 방지)
+DEBOUNCE_FRAMES   = 60            # 마커가 N프레임 연속 보여야 "진짜 보임"으로 인정 (오검출 방지)
 CONTROL_HZ        = 10.0
 # ────────────────────────────────────────────────────────────
 
