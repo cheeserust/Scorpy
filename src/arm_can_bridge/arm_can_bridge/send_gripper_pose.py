@@ -15,6 +15,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
 
+from .can_protocol import BOARD3_TARGET_LOAD_MAX
+
 
 GRIPPER_ACTION_NAME = '/gripper_controller/follow_joint_trajectory'
 JOINT_STATES_TOPIC = '/joint_states'
@@ -83,6 +85,7 @@ class GripperPoseClient(Node):
         close_step_rad: float | None,
         open_step_rad: float | None,
         duration_s: float,
+        target_load_raw: int | None,
     ) -> int:
         """Send one absolute, relative, close, or open gripper pose goal."""
         if not self._client.wait_for_server(timeout_sec=5.0):
@@ -111,7 +114,12 @@ class GripperPoseClient(Node):
                 raise RuntimeError('A gripper target is required')
 
             self._validate_target(target)
-            return self._send_goal(current, target, duration_s)
+            return self._send_goal(
+                current,
+                target,
+                duration_s,
+                target_load_raw,
+            )
         except RuntimeError as exc:
             self.get_logger().error(str(exc))
             return 1
@@ -207,18 +215,23 @@ class GripperPoseClient(Node):
         current: Sequence[float],
         target: Sequence[float],
         duration_s: float,
+        target_load_raw: int | None,
     ) -> int:
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = list(GRIPPER_JOINT_NAMES)
         goal.trajectory.points = [
             self._point(current, 0.0),
-            self._point(target, duration_s),
+            self._point(target, duration_s, target_load_raw),
         ]
 
         self.get_logger().info(
             'Target gripper degrees: '
             f'{[round(math.degrees(value), 3) for value in target]}'
         )
+        if target_load_raw is not None:
+            self.get_logger().info(
+                f'Target gripper load raw: {target_load_raw}'
+            )
 
         future = self._client.send_goal_async(
             goal,
@@ -245,9 +258,12 @@ class GripperPoseClient(Node):
     def _point(
         positions: Sequence[float],
         time_from_start_s: float,
+        target_load_raw: int | None = None,
     ) -> JointTrajectoryPoint:
         point = JointTrajectoryPoint()
         point.positions = [float(value) for value in positions]
+        if target_load_raw is not None:
+            point.effort = [float(target_load_raw) for _ in positions]
         whole_seconds = int(time_from_start_s)
         point.time_from_start.sec = whole_seconds
         point.time_from_start.nanosec = int(
@@ -325,6 +341,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Trajectory duration in seconds. Default: 1.5',
     )
     parser.add_argument(
+        '--target-load',
+        type=int,
+        default=None,
+        help=(
+            'Board3 target load raw value 0..1023. If omitted, '
+            'arm_can_bridge uses gripper_target_load_raw.'
+        ),
+    )
+    parser.add_argument(
         '--action-name',
         default=GRIPPER_ACTION_NAME,
         help=f'FollowJointTrajectory action name. Default: {GRIPPER_ACTION_NAME}',
@@ -352,6 +377,13 @@ def main(args=None):
         parser.error('--duration must be greater than 0')
     if parsed_args.step <= 0.0:
         parser.error('--step must be greater than 0')
+    if (
+        parsed_args.target_load is not None
+        and not 0 <= parsed_args.target_load <= BOARD3_TARGET_LOAD_MAX
+    ):
+        parser.error(
+            f'--target-load must be in 0..{BOARD3_TARGET_LOAD_MAX}'
+        )
 
     close_step_rad = None
     open_step_rad = None
@@ -375,6 +407,7 @@ def main(args=None):
             close_step_rad=close_step_rad,
             open_step_rad=open_step_rad,
             duration_s=float(parsed_args.duration),
+            target_load_raw=parsed_args.target_load,
         )
     finally:
         node.destroy_node()

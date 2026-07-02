@@ -2,17 +2,20 @@
 
 from dataclasses import dataclass
 import math
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from trajectory_msgs.msg import JointTrajectory
 
 from .can_protocol import (
+    BOARD3_TARGET_LOAD_MAX,
     BOARD_ID_BOARD1,
+    BOARD_ID_BOARD3,
     board_id_from_move_can_id,
     CanFrame,
     DURATION_TICK_NS,
     MAX_DURATION_TICKS,
     motor_count_for_board,
+    pack_board3_servo_command,
     pack_position_command,
     rad_to_angle_raw,
     validate_board_id,
@@ -63,6 +66,7 @@ class ArmTrajectoryConverter:
         max_positions_rad: Sequence[float],
         board_ids: Sequence[int] | None = None,
         speed_raw: int = 0,
+        aux_raw_by_board: Mapping[int, int] | None = None,
         start_position_tolerance_rad: float = 0.02,
     ):
         self._joint_names = tuple(joint_names)
@@ -82,6 +86,14 @@ class ArmTrajectoryConverter:
             float(value) for value in max_positions_rad
         )
         self._speed_raw = int(speed_raw)
+        self._aux_raw_by_board = {
+            validate_board_id(board_id): int(value)
+            for board_id, value in (
+                aux_raw_by_board.items()
+                if aux_raw_by_board is not None
+                else ()
+            )
+        }
         self._start_tolerance = float(
             start_position_tolerance_rad
         )
@@ -131,6 +143,18 @@ class ArmTrajectoryConverter:
 
         if not 0 <= self._speed_raw <= 0xFFFF:
             raise ValueError('speed_raw must fit uint16')
+
+        for board_id, value in self._aux_raw_by_board.items():
+            if board_id == BOARD_ID_BOARD3:
+                if not 0 <= value <= BOARD3_TARGET_LOAD_MAX:
+                    raise ValueError(
+                        'Board3 target load must be in range '
+                        f'0..{BOARD3_TARGET_LOAD_MAX}'
+                    )
+            elif not 0 <= value <= 0xFFFF:
+                raise ValueError(
+                    f'aux_raw_by_board[{board_id}] must fit uint16'
+                )
 
         if self._start_tolerance < 0.0:
             raise ValueError(
@@ -251,6 +275,47 @@ class ArmTrajectoryConverter:
 
         return tuple(ordered_values)
 
+    def _reorder_effort_target_loads(
+        self,
+        efforts: Sequence[float],
+        joint_indices: Sequence[int],
+        point_index: int,
+    ) -> tuple[int | None, ...] | None:
+        if not efforts:
+            return None
+
+        if len(efforts) != len(joint_indices):
+            raise TrajectoryConversionError(
+                f'Point {point_index} effort length does not '
+                'match joint_names length'
+            )
+
+        target_loads: list[int | None] = []
+
+        for joint_index, received_index in enumerate(joint_indices):
+            if self._board_ids[joint_index] != BOARD_ID_BOARD3:
+                target_loads.append(None)
+                continue
+
+            effort_value = float(efforts[received_index])
+            if not math.isfinite(effort_value):
+                raise TrajectoryConversionError(
+                    f'Point {point_index} contains a non-finite '
+                    f'target load for {self._joint_names[joint_index]}'
+                )
+
+            target_load = int(round(effort_value))
+            if not 0 <= target_load <= BOARD3_TARGET_LOAD_MAX:
+                raise TrajectoryConversionError(
+                    f'Point {point_index} target load for '
+                    f'{self._joint_names[joint_index]} must be in '
+                    f'[0, {BOARD3_TARGET_LOAD_MAX}], got {target_load}'
+                )
+
+            target_loads.append(target_load)
+
+        return tuple(target_loads)
+
     @staticmethod
     def _split_duration_ticks(
         duration_ns: int,
@@ -273,24 +338,54 @@ class ArmTrajectoryConverter:
 
         return tuple(chunks)
 
+    def _aux_raw_for_joint(self, joint_index: int) -> int:
+        board_id = self._board_ids[joint_index]
+        return self._aux_raw_by_board.get(board_id, self._speed_raw)
+
     def _build_frames(
         self,
         target_positions: Sequence[float],
         duration_ticks: int,
+        target_loads_raw: Sequence[int | None] | None = None,
     ) -> tuple[CanFrame, ...]:
         frames = []
 
+        if (
+            target_loads_raw is not None
+            and len(target_loads_raw) != len(self._joint_names)
+        ):
+            raise ValueError('target_loads_raw length must match joint_names')
+
         for index, target_position in enumerate(target_positions):
-            frame = pack_position_command(
-                board_id=self._board_ids[index],
-                motor_id=self._motor_ids[index],
-                target_pos=rad_to_angle_raw(target_position),
-                speed=self._speed_raw,
-                duration_ticks=duration_ticks,
-                execute=True,
-                relative=False,
-                step_mode=False,
-            )
+            board_id = self._board_ids[index]
+            target_pos_raw = rad_to_angle_raw(target_position)
+
+            if board_id == BOARD_ID_BOARD3:
+                target_load = self._aux_raw_for_joint(index)
+                if (
+                    target_loads_raw is not None
+                    and target_loads_raw[index] is not None
+                ):
+                    target_load = int(target_loads_raw[index])
+
+                frame = pack_board3_servo_command(
+                    motor_id=self._motor_ids[index],
+                    target_pos=target_pos_raw,
+                    target_load=target_load,
+                    duration_ticks=duration_ticks,
+                    execute=True,
+                )
+            else:
+                frame = pack_position_command(
+                    board_id=board_id,
+                    motor_id=self._motor_ids[index],
+                    target_pos=target_pos_raw,
+                    speed=self._aux_raw_for_joint(index),
+                    duration_ticks=duration_ticks,
+                    execute=True,
+                    relative=False,
+                    step_mode=False,
+                )
             frames.append(frame)
 
         return tuple(frames)
@@ -332,6 +427,11 @@ class ArmTrajectoryConverter:
         for point_index, point in enumerate(trajectory.points):
             target_positions = self._reorder_positions(
                 point.positions,
+                joint_indices,
+                point_index,
+            )
+            target_loads_raw = self._reorder_effort_target_loads(
+                point.effort,
                 joint_indices,
                 point_index,
             )
@@ -395,6 +495,7 @@ class ArmTrajectoryConverter:
                 frames = self._build_frames(
                     intermediate_target,
                     duration_ticks,
+                    target_loads_raw,
                 )
 
                 batches.append(

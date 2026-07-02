@@ -38,6 +38,7 @@ BOARD_ID_ALL = 0xFF
 BOARD1_MOTOR_COUNT = 4
 BOARD2_MOTOR_COUNT = 1
 BOARD3_SERVO_COUNT = 9
+BOARD3_TARGET_LOAD_MAX = 1023
 
 ALL_MOTORS = 0xFF
 REQUIRED_HOMING_MASK = 0x0F
@@ -421,6 +422,19 @@ def motor_count_for_board(board_id: int) -> int:
     return BOARD3_SERVO_COUNT
 
 
+def validate_board3_target_load(target_load: int) -> int:
+    """Return a normalized Board3 target load or raise ValueError."""
+    normalized = int(target_load)
+
+    if not 0 <= normalized <= BOARD3_TARGET_LOAD_MAX:
+        raise ValueError(
+            'target_load must be in range '
+            f'0..{BOARD3_TARGET_LOAD_MAX}, got {normalized}'
+        )
+
+    return normalized
+
+
 def build_control_byte(
     motor_id: int,
     *,
@@ -502,6 +516,27 @@ def pack_position_command(
         int(duration_ticks),
     )
     return CanFrame(move_can_id_for_board(normalized_board_id), data)
+
+
+def pack_board3_servo_command(
+    motor_id: int,
+    target_pos: int,
+    target_load: int,
+    duration_ticks: int,
+    *,
+    execute: bool = True,
+) -> CanFrame:
+    """Pack one Board3 servo command with Byte 5~6 as target load."""
+    return pack_position_command(
+        motor_id=motor_id,
+        target_pos=target_pos,
+        speed=validate_board3_target_load(target_load),
+        duration_ticks=duration_ticks,
+        board_id=BOARD_ID_BOARD3,
+        execute=execute,
+        relative=False,
+        step_mode=False,
+    )
 
 
 def _reserved_payload(*values: int) -> bytes:

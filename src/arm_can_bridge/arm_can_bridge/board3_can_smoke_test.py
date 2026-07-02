@@ -20,9 +20,9 @@ from .can_protocol import (
     CAN_ID_BOARD3_STATUS,
     CanFrame,
     error_name_for_board,
+    pack_board3_servo_command,
     pack_clear_error,
     pack_enable,
-    pack_position_command,
     unpack_board3_position_feedback,
     unpack_status,
 )
@@ -195,16 +195,15 @@ def send_gripper_set(
     *,
     target_001deg: int,
     duration_ticks: int,
-    speed: int,
+    target_load: int,
 ) -> None:
     """Send one complete nine-servo Board3 command set."""
     for motor_id in range(BOARD3_SERVO_COUNT):
-        frame = pack_position_command(
+        frame = pack_board3_servo_command(
             motor_id=motor_id,
             target_pos=target_001deg,
-            speed=speed,
+            target_load=target_load,
             duration_ticks=duration_ticks,
-            board_id=BOARD_ID_BOARD3,
         )
         send_frame(transport, frame)
 
@@ -232,10 +231,16 @@ def parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         help='Duration in 5 ms ticks, default: 100 = 500 ms',
     )
     parser.add_argument(
-        '--speed',
+        '--target-load',
         type=int,
-        default=0,
-        help='Raw speed field, default: 0',
+        default=500,
+        help='Board3 target load raw value 0..1023, default: 500',
+    )
+    parser.add_argument(
+        '--speed',
+        dest='target_load',
+        type=int,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--timeout',
@@ -323,6 +328,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(
             'Sending 9 servo frames: '
             f'target={target_001deg} x0.01deg, '
+            f'target_load={int(args.target_load)}, '
             f'duration={args.duration_ticks} ticks'
         )
 
@@ -330,7 +336,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             transport,
             target_001deg=target_001deg,
             duration_ticks=int(args.duration_ticks),
-            speed=int(args.speed),
+            target_load=int(args.target_load),
         )
 
         complete_status = monitor.wait_until(

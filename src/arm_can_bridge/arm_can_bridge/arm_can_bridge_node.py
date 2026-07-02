@@ -262,6 +262,9 @@ class ArmCanBridgeNode(Node):
         self.declare_parameter('status_publish_period_ms', 500)
         self.declare_parameter('joint_states_topic', '/joint_states')
         self.declare_parameter('joint_state_rate_hz', 50.0)
+        self.declare_parameter('arm_speed_raw', 0)
+        self.declare_parameter('gripper_target_load_raw', 500)
+        # Backward-compatible alias for older config files.
         self.declare_parameter('speed_raw', 0)
         self.declare_parameter('queue_wait_timeout_ms', 3000)
         self.declare_parameter('completion_grace_ms', 3000)
@@ -426,7 +429,8 @@ class ArmCanBridgeNode(Node):
             motor_ids=motor_ids,
             min_positions_rad=min_positions_rad,
             max_positions_rad=max_positions_rad,
-            speed_raw=int(self.get_parameter('speed_raw').value),
+            speed_raw=self._speed_raw_for_controller(label),
+            aux_raw_by_board=self._aux_raw_by_board_for_controller(label),
             start_position_tolerance_rad=float(
                 self.get_parameter('start_position_tolerance_rad').value
             ),
@@ -454,6 +458,28 @@ class ArmCanBridgeNode(Node):
             trajectory_converter=trajectory_converter,
             trajectory_streamer=trajectory_streamer,
         )
+
+    def _speed_raw_for_controller(self, label: str) -> int:
+        if label != 'arm':
+            return 0
+
+        arm_speed_raw = int(self.get_parameter('arm_speed_raw').value)
+        legacy_speed_raw = int(self.get_parameter('speed_raw').value)
+
+        if arm_speed_raw == 0 and legacy_speed_raw != 0:
+            return legacy_speed_raw
+
+        return arm_speed_raw
+
+    def _aux_raw_by_board_for_controller(self, label: str) -> dict[int, int]:
+        if label != 'gripper':
+            return {}
+
+        return {
+            BOARD_ID_BOARD3: int(
+                self.get_parameter('gripper_target_load_raw').value
+            ),
+        }
 
     def _create_board_state(
         self,

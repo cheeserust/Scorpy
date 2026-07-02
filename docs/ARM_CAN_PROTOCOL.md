@@ -1418,8 +1418,8 @@ DLC = 8
 | 2 | Target Position | `int32_t` 일부 | 0.01도 단위, little endian |
 | 3 | Target Position | `int32_t` 일부 | 0.01도 단위, little endian |
 | 4 | Target Position MSB | `int32_t` 일부 | 0.01도 단위, little endian |
-| 5 | Speed LSB | `uint16_t` 일부 | 현재 미사용, `0` 권장 |
-| 6 | Speed MSB | `uint16_t` 일부 | 현재 미사용, `0` 권장 |
+| 5 | Target Load LSB | `uint16_t` 일부 | 부하 임계값 `0~1023`, little endian |
+| 6 | Target Load MSB | `uint16_t` 일부 | 부하 임계값 `0~1023`, little endian |
 | 7 | Duration | `uint8_t` | 5ms 단위 tick |
 
 ---
@@ -1560,21 +1560,31 @@ uint16_t duration_ms = (uint16_t)g_cmd.duration_5ms * 5U;
 
 ---
 
-## 10. Speed 필드
+## 10. Target Load 필드
 
-`Byte5~6`은 Speed 필드로 남겨두지만, 현재 버전에서는 사용하지 않습니다.
+`Byte5~6`은 Board3 파지력 제어용 Target Load 필드입니다.
+기존 Speed 자리와 같은 `uint16_t little endian` 구조를 유지하되,
+Board3에서는 이 값을 부하 임계값으로 해석합니다.
 
 ```text
-Speed = 0 권장
+Target Load 범위 = 0~1023
 ```
 
 처리 정책:
 
 ```text
-수신은 하지만 동작 계산에는 사용하지 않음
+모터가 해당 부하에 도달하면 이동을 멈추고 CONTACT_HOLD 상태를 유지
 ```
 
-향후 속도 제어가 필요하면 프로토콜 v2에서 재정의합니다.
+권장 기본값:
+
+```text
+Target Load = 500
+```
+
+하위 호환을 위해 firmware는 `0`이 들어오면 내부 기본 안전값으로 대체할 수 있습니다.
+중앙서버는 기본적으로 `500`을 보내고, 물체별 파지력이 필요한 경우
+`JointTrajectoryPoint.effort[]`에 raw load 값을 넣어 goal별로 override합니다.
 
 ---
 
@@ -2147,18 +2157,19 @@ candump can0
 
 ### 22.1 Gripper 9개 frame 예시
 
-아래 예시는 9개 Motor ID 모두 target angle 0.00도, duration 100ms로 보내는 구조입니다.
+아래 예시는 9개 Motor ID 모두 target angle 0.00도, target load 500,
+duration 100ms로 보내는 구조입니다.
 
 ```bash
-cansend can0 103#8000000000000014
-cansend can0 103#8100000000000014
-cansend can0 103#8200000000000014
-cansend can0 103#8300000000000014
-cansend can0 103#8400000000000014
-cansend can0 103#8500000000000014
-cansend can0 103#8600000000000014
-cansend can0 103#8700000000000014
-cansend can0 103#8800000000000014
+cansend can0 103#8000000000F40114
+cansend can0 103#8100000000F40114
+cansend can0 103#8200000000F40114
+cansend can0 103#8300000000F40114
+cansend can0 103#8400000000F40114
+cansend can0 103#8500000000F40114
+cansend can0 103#8600000000F40114
+cansend can0 103#8700000000F40114
+cansend can0 103#8800000000F40114
 ```
 
 해석:
@@ -2166,7 +2177,7 @@ cansend can0 103#8800000000000014
 ```text
 Byte0 = 0x80~0x88, Execute=1, Motor ID=0~8
 Byte1~4 = 0, target angle 0.00도
-Byte5~6 = 0, speed unused
+Byte5~6 = 0x01F4 = 500, target load
 Byte7 = 0x14 = 20 × 5ms = 100ms
 ```
 
@@ -2181,8 +2192,9 @@ Byte7 = 0x14 = 20 × 5ms = 100ms
 4. Motor ID 0~8의 9개 frame이 모두 모였을 때만 하나의 gripper command set으로 처리한다.
 5. 일부 frame만 들어오거나 잘못된 frame이 있으면 전체 command set을 폐기한다.
 6. g_cmd에는 servo position이 아니라 0.01도 단위 각도값을 넣는다.
-7. g_cmd.duration_5ms에는 CAN Byte7 원본값을 넣는다.
-8. Homing 0x020과 Clear Error 0x030은 Target Board + Target Local Motor ID 구조를 사용한다.
-9. Board3는 Target Board가 3, 0, 255일 때만 공통 명령을 처리한다.
-10. Board3 homing은 물리적 원점 탐색이 아니라 모든 gripper joint를 0.00도로 보내는 home posture 명령이다.
+7. Byte5~6은 Target Load raw 값이며 기본 권장값은 500이다.
+8. g_cmd.duration_5ms에는 CAN Byte7 원본값을 넣는다.
+9. Homing 0x020과 Clear Error 0x030은 Target Board + Target Local Motor ID 구조를 사용한다.
+10. Board3는 Target Board가 3, 0, 255일 때만 공통 명령을 처리한다.
+11. Board3 homing은 물리적 원점 탐색이 아니라 모든 gripper joint를 0.00도로 보내는 home posture 명령이다.
 ```

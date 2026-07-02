@@ -5,6 +5,7 @@ import math
 from arm_can_bridge.can_protocol import (
     ALL_MOTORS,
     angle_raw_to_rad,
+    BOARD3_TARGET_LOAD_MAX,
     Board3FeedbackMotorStatus,
     BoardError,
     BoardState,
@@ -12,6 +13,7 @@ from arm_can_bridge.can_protocol import (
     decode_control_byte,
     duration_ns_to_ticks,
     error_name_for_board,
+    pack_board3_servo_command,
     pack_clear_error,
     pack_enable,
     pack_estop,
@@ -202,6 +204,37 @@ def test_position_command_supports_negative_target():
         signed=False,
     ) == 123
     assert frame.data[7] == 20
+
+
+def test_board3_servo_command_uses_target_load_field():
+    frame = pack_board3_servo_command(
+        motor_id=0,
+        target_pos=0,
+        target_load=500,
+        duration_ticks=100,
+    )
+
+    assert frame.can_id == 0x103
+    assert frame.data == bytes([
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0xF4,
+        0x01,
+        0x64,
+    ])
+
+
+def test_board3_servo_command_rejects_invalid_target_load():
+    with pytest.raises(ValueError, match='target_load'):
+        pack_board3_servo_command(
+            motor_id=0,
+            target_pos=0,
+            target_load=BOARD3_TARGET_LOAD_MAX + 1,
+            duration_ticks=100,
+        )
 
 
 def test_control_commands_use_final_can_ids_and_payload_lengths():

@@ -99,8 +99,12 @@ arm_can_bridge:
       - 0.0
       - 0.0
 
-    # Firmware 초기 버전에서는 Speed를 보간에 사용하지 않으므로 0으로 보낸다.
-    speed_raw: 0
+    # Board1/2 Speed 필드다. 현재 firmware에서는 보간에 사용하지 않으므로 0으로 보낸다.
+    arm_speed_raw: 0
+
+    # Board3 0x103 Byte 5~6은 Target Load(파지력 임계값)로 사용한다.
+    # JointTrajectoryPoint.effort[]에 load가 있으면 goal별 값이 이 기본값보다 우선한다.
+    gripper_target_load_raw: 500
 
     # 0x201/0x202/0x203 상태가 이 시간보다 오래 들어오지 않으면 연결 이상으로 본다.
     status_timeout_ms: 500

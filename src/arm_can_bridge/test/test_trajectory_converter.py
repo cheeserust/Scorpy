@@ -59,6 +59,15 @@ def frame_target(frame) -> int:
     )
 
 
+def frame_aux_raw(frame) -> int:
+    """Decode Byte 5~6 as unsigned aux field."""
+    return int.from_bytes(
+        frame.data[5:7],
+        byteorder='little',
+        signed=False,
+    )
+
+
 def test_reorders_joint_names_and_builds_four_frames():
     converter = make_converter()
 
@@ -252,6 +261,76 @@ def test_builds_board3_frames_for_integrated_gripper():
         0x88,
     ]
     assert batches[0].queue_slots_by_board == {1: 4, 2: 1, 3: 9}
+
+
+def test_board3_frames_use_configured_default_target_load():
+    joint_names = (
+        'finger_1_base_joint',
+        'finger_1_middle_joint',
+        'finger_1_tip_joint',
+        'finger_2_base_joint',
+        'finger_2_middle_joint',
+        'finger_2_tip_joint',
+        'finger_3_base_joint',
+        'finger_3_middle_joint',
+        'finger_3_tip_joint',
+    )
+    converter = ArmTrajectoryConverter(
+        joint_names=joint_names,
+        board_ids=(3,) * len(joint_names),
+        motor_ids=tuple(range(len(joint_names))),
+        min_positions_rad=(-math.pi,) * len(joint_names),
+        max_positions_rad=(math.pi,) * len(joint_names),
+        aux_raw_by_board={3: 500},
+        start_position_tolerance_rad=0.02,
+    )
+
+    trajectory = JointTrajectory()
+    trajectory.joint_names = list(joint_names)
+    trajectory.points = [
+        make_point((0.1,) * len(joint_names), 50_000_000)
+    ]
+
+    batches = converter.convert(
+        trajectory,
+        current_positions_rad=(0.0,) * len(joint_names),
+    )
+
+    assert [frame_aux_raw(frame) for frame in batches[0].frames] == [500] * 9
+
+
+def test_board3_frames_can_override_target_load_with_effort():
+    joint_names = (
+        'finger_1_base_joint',
+        'finger_1_middle_joint',
+        'finger_1_tip_joint',
+    )
+    converter = ArmTrajectoryConverter(
+        joint_names=joint_names,
+        board_ids=(3, 3, 3),
+        motor_ids=(0, 1, 2),
+        min_positions_rad=(-math.pi,) * len(joint_names),
+        max_positions_rad=(math.pi,) * len(joint_names),
+        aux_raw_by_board={3: 500},
+        start_position_tolerance_rad=0.02,
+    )
+
+    trajectory = JointTrajectory()
+    trajectory.joint_names = list(joint_names)
+    point = make_point((0.1, 0.2, 0.3), 50_000_000)
+    point.effort = [300.0, 450.0, 600.0]
+    trajectory.points = [point]
+
+    batches = converter.convert(
+        trajectory,
+        current_positions_rad=(0.0,) * len(joint_names),
+    )
+
+    assert [frame_aux_raw(frame) for frame in batches[0].frames] == [
+        300,
+        450,
+        600,
+    ]
 
 
 def test_matching_zero_time_start_point_is_skipped():
