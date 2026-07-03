@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 # 카메라 캘리브레이션 
+# 로지텍
 FRONT_CAMERA_MATRIX = np.array([
     [708.85065781,   0.0,        308.289349  ],
     [  0.0,        707.92630029, 244.0512732 ],
@@ -25,6 +26,7 @@ FRONT_DIST_COEFFS = np.array(
     [0.02414867, 0.89713946, 0.00248749, -0.01085416, -2.32266594]
 )
 
+# Pleomax
 REAR_CAMERA_MATRIX = np.array([
     [859.90806761,   0.0,        252.83359168],
     [  0.0,        858.64794316, 248.03325075],
@@ -41,6 +43,7 @@ FRONT_IMAGE_TOPIC = "/front_camera/image_raw"   # 캐빈 안쪽 BOARD 마커용
 REAR_IMAGE_TOPIC  = "/rear_camera/image_raw"    # 복도 floor-id 마커용
 FLOOR_IDS = [4, 5]
 
+
 MARKER_LENGTH     = 0.1          # 마커 한 변 길이(m)
 TARGET_STOP_CM    = 50.0         # 마커까지 목표 거리(cm)
 STOP_TOLERANCE_CM = 3.0          # 허용 오차
@@ -50,9 +53,10 @@ MIN_LINEAR        = 0.1          # m/s
 KP_LINEAR         = 0.01         # 거리 제어 비례 상수
 KP_ANGULAR        = 0.5          # 각도 제어 비례 상수
 
-DEBOUNCE_FRAMES   = 60            # 마커가 N프레임 연속 보여야 "진짜 보임"으로 인정 (오검출 방지)
+DEBOUNCE_FRAMES   = 30            # 마커가 N프레임 연속 보여야 "진짜 보임"으로 인정 (오검출 방지)
 LOST_FRAMES       = 30            # 마커가 N프레임 연속 안 보여야 "사라짐"으로 인정 (오검출 방지)
 CONTROL_HZ        = 10.0
+LOST_TZ_FINISH_CM = 80.0          # 이 거리안에서 놓치면 탑승완료로 간주
 # ────────────────────────────────────────────────────────────
 
 # FSM 상태 정의
@@ -61,6 +65,8 @@ BOARDING   = "BOARDING"     # 전진 탑승 중
 RIDING     = "RIDING"       # 운행 중, 도착층 floor-id 마커 대기
 EXITING    = "EXITING"      # 후진(또는 전진) 하차 중
 DONE       = "DONE"
+FRONT_STATES = (WAIT_BOARD, BOARDING)
+REAR_STATES  = (RIDING, EXITING)
 
 half = MARKER_LENGTH / 2.0
 OBJ_POINTS = np.array([
@@ -88,33 +94,42 @@ class ElevatorMVP(Node):
         # 최신 pose 캐시: {marker_id: (tz_cm, tx_m, frame_idx)}
         self.front_pose = {}
         self.rear_pose  = {}
-        self.frame_idx = 0
+        self.frame_idx = {"front": 0, "rear": 0}
 
         self.create_subscription(Image, FRONT_IMAGE_TOPIC,
-                                lambda m: self.image_cb(m, self.front_seen, self.front_pose,
-                                                         FRONT_CAMERA_MATRIX, FRONT_DIST_COEFFS),
-                                qos_profile_sensor_data)
+            lambda m: self.image_cb(m, "front", self.front_seen, self.front_pose,
+                                    FRONT_CAMERA_MATRIX, FRONT_DIST_COEFFS),
+            qos_profile_sensor_data)
         self.create_subscription(Image, REAR_IMAGE_TOPIC,
-                                lambda m: self.image_cb(m, self.rear_seen, self.rear_pose,
-                                                         REAR_CAMERA_MATRIX, REAR_DIST_COEFFS),
-                                qos_profile_sensor_data)
+            lambda m: self.image_cb(m, "rear", self.rear_seen, self.rear_pose,
+                                    REAR_CAMERA_MATRIX, REAR_DIST_COEFFS),
+            qos_profile_sensor_data)
 
         self.state = WAIT_BOARD
+        
         self.target_floor: Optional[int] = None
+
 
         self.create_timer(1.0 / CONTROL_HZ, self.control_loop)
         self.get_logger().info("ElevatorMVP 시작. 상태=WAIT_BOARD")
 
     # ── 이미지 콜백: 검출 + pose 계산 ─────────────────────────
-    def image_cb(self, msg, seen_dict, pose_dict, camera_matrix, dist_coeffs):
-        self.frame_idx += 1
+    def image_cb(self, msg, cam, seen_dict, pose_dict, camera_matrix, dist_coeffs):
+        if cam == "front" and self.state not in FRONT_STATES:
+            return
+        if cam == "rear"  and self.state not in REAR_STATES:
+            return
+        self.frame_idx[cam] += 1
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
         now_ids = {int(i) for i in ids.flatten()} if ids is not None else set()
 
         for mid in set(seen_dict) | now_ids:
-            seen_dict[mid] = seen_dict.get(mid, 0) + 1 if mid in now_ids else 0
+            seen_dict[mid] = min(seen_dict.get(mid, 0) + 1, DEBOUNCE_FRAMES) if mid in now_ids else max(seen_dict.get(mid, 0) - 1, 0)
+
+
+        self.get_logger().info(f'detected ids: {now_ids}')
 
         if ids is None:
             return
@@ -128,20 +143,21 @@ class ElevatorMVP(Node):
             if ok:
                 tz_cm = float(tvec[2][0]) * 100.0
                 tx_m  = float(tvec[0][0])
-                pose_dict[int(marker_id)] = (tz_cm, tx_m, self.frame_idx)
+                pose_dict[int(marker_id)] = (tz_cm, tx_m, self.frame_idx[cam])
 
     def stable_seen(self, seen_dict, marker_id) -> bool:
         return seen_dict.get(marker_id, 0) >= DEBOUNCE_FRAMES
 
-    def get_fresh_pose(self, pose_dict, marker_id):
+    def get_fresh_pose(self, cam, pose_dict, marker_id):
         """최근 프레임에서 검출된 pose만 유효로 인정 (LOST 판단용)"""
         entry = pose_dict.get(marker_id)
         if entry is None:
             return None
         tz_cm, tx_m, seen_frame = entry
-        if self.frame_idx - seen_frame > LOST_FRAMES_LIMIT:
+        if self.frame_idx[cam] - seen_frame > LOST_FRAMES:
             return None
         return tz_cm, tx_m
+    
 
     # ── 서보잉 제어: 목표거리까지 P control ───────────────────
     def servo_toward(self, tz_cm, tx_m, direction):
@@ -166,7 +182,7 @@ class ElevatorMVP(Node):
                 self.state = BOARDING
 
         elif self.state == BOARDING:
-            pose = self.get_fresh_pose(self.front_pose, BOARD_MARKER_ID)
+            pose = self.get_fresh_pose("front", self.front_pose, BOARD_MARKER_ID)
             if pose is None:
                 self.get_logger().warn("BOARD 마커 놓침 → 정지(안전)")
                 self.stop()
@@ -181,8 +197,7 @@ class ElevatorMVP(Node):
 
         elif self.state == RIDING:
             for floor in FLOOR_IDS:
-                marker_id = floor
-                if self.stable_seen(self.rear_seen, marker_id):
+                if self.stable_seen(self.rear_seen, floor):
                     self.target_floor = floor
                     self.get_logger().info(f"도착 문 열림 감지 → {floor}층")
                     self.state = EXITING
@@ -191,7 +206,7 @@ class ElevatorMVP(Node):
         elif self.state == EXITING:
             if self.target_floor is None:
                 return
-            pose = self.get_fresh_pose(self.rear_pose, self.target_floor)
+            pose = self.get_fresh_pose("rear", self.rear_pose, self.target_floor)
             if pose is None:
                 self.get_logger().warn("층 마커 놓침 → 정지(안전)")
                 self.stop()
@@ -224,9 +239,11 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.stop()
+        if rclpy.ok():
+            node.stop()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

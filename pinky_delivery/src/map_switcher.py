@@ -16,6 +16,7 @@ from rclpy.node import Node
 from nav2_msgs.srv import LoadMap
 from std_msgs.msg import Int32
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from ament_index_python.packages import get_package_share_directory
 
 
 class MapSwitcher(Node):
@@ -25,7 +26,7 @@ class MapSwitcher(Node):
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
 
         config_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'floor_markers.yaml'
+            get_package_share_directory('pinky_delivery'), 'config', 'floor_markers.yaml'
         )
         self.marker_table = self.load_marker_table(config_path)
         self.last_floor = None  # debounce
