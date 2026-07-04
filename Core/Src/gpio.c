@@ -48,7 +48,7 @@ void gpio_init(void)
     gpio_output(CS3_PORT, CS3_PIN);      // 3번 axis TMC5160 CS
     gpio_output(DIR4_PORT, DIR4_PIN);    // 4번 axis dir
     gpio_output(STEP4_PORT, STEP4_PIN);  // 4번 axis step
-    gpio_output(CS4_PORT, CS4_PIN);      // 4번 axis TMC5160 CS
+    gpio_output(CS4_PORT, CS4_PIN);      // 4번 axis TMC2240 CS
     gpio_output(TMC_MOSI_PORT, TMC_MOSI_PIN);  // SPI MOSI
     gpio_output(TMC_CLK_PORT, TMC_CLK_PIN);    // SPI CLK
 
@@ -56,7 +56,7 @@ void gpio_init(void)
     gpio_output(MOTOR_EN_PORT, MOTOR_EN_PIN);  // 모터 드라이버 en핀 설정
     gpio_output(MCP_CS_PORT, MCP_CS_PIN);      // MCP2515 SPI CS
 
-    gpio_input_pullup(TMC_MISO_PORT, TMC_MISO_PIN);  // TMC5160 MISO
+    gpio_input_pullup(TMC_MISO_PORT, TMC_MISO_PIN);  // TMC MISO
     gpio_input_pullup(LIM1_PORT, LIM1_PIN);          // 1번 축 리미트 스위치 pull up
     gpio_input_pullup(LIM2_PORT, LIM2_PIN);          // 2번 축 리미트 스위치 pull up
     gpio_input_pullup(LIM3_PORT, LIM3_PIN);          // 3번 축 리미트 스위치 pull up
@@ -74,8 +74,8 @@ void gpio_init(void)
     GPIO_SET_ODR(CS1_PORT, CS1_PIN);        // TMC5160 CS 초기값 high
     GPIO_SET_ODR(CS2_PORT, CS2_PIN);        // TMC5160 CS 초기값 high
     GPIO_SET_ODR(CS3_PORT, CS3_PIN);        // TMC5160 CS 초기값 high
-    GPIO_SET_ODR(CS4_PORT, CS4_PIN);        // TMC5160 CS 초기값 high
-    GPIO_SET_ODR(TMC_CLK_PORT, TMC_CLK_PIN); // TMC5160 CLK idle high
+    GPIO_SET_ODR(CS4_PORT, CS4_PIN);        // TMC2240 CS 초기값 high
+    GPIO_SET_ODR(TMC_CLK_PORT, TMC_CLK_PIN); // TMC CLK idle high
     GPIO_SET_ODR(MOTOR_EN_PORT, MOTOR_EN_PIN); // 모터 en핀 초기값 high(disable)
     GPIO_SET_ODR(MCP_CS_PORT, MCP_CS_PIN);   // MCP2515 CS 초기값 high
 }

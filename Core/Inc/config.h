@@ -6,19 +6,46 @@
 
 #define SYSCLK_HZ                (96 * 1000 * 1000) // 96 MHz
 
+#ifndef BOARD_ID
+#define BOARD_ID                 1
+#endif
+#define ENABLE_UART 1
+
+#if BOARD_ID == 1
 #define AXIS_COUNT               4
+#define BOARD_STAGING_FRAME_COUNT 4
+#define BOARD_MOVE_CAN_ID        0x101
+#define BOARD_STATUS_CAN_ID      0x201
+#define BOARD_POSITION_CAN_ID    0x301
+#elif BOARD_ID == 2
+#define AXIS_COUNT               1
+#define BOARD_STAGING_FRAME_COUNT 1
+#define BOARD_MOVE_CAN_ID        0x102
+#define BOARD_STATUS_CAN_ID      0x202
+#define BOARD_POSITION_CAN_ID    0x302
+#else
+#error "Unsupported BOARD_ID"
+#endif
+
 #define MICROSTEP                16
 #define TRAJECTORY_QUEUE_SIZE    32
-#define MULTI_AXIS_QUEUE_SIZE    (TRAJECTORY_QUEUE_SIZE / AXIS_COUNT)
-#define PENDING_TIMEOUT_MS       20
+#define TRAJECTORY_POINT_QUEUE_SIZE (TRAJECTORY_QUEUE_SIZE / BOARD_STAGING_FRAME_COUNT)
+#define MULTI_AXIS_QUEUE_SIZE    TRAJECTORY_POINT_QUEUE_SIZE
+#define STAGING_TIMEOUT_MS       20
+#define MIN_STEP_INTERVAL_TICKS 5-1 //(200rpm)
+
 
 #define CAN_ID_ESTOP             0x001
 #define CAN_ID_ENABLE            0x010
 #define CAN_ID_HOMING            0x020
 #define CAN_ID_CLEAR_ERROR       0x030
-#define CAN_ID_BOARD1_MOVE       0x101
-#define CAN_ID_BOARD1_STAT       0x201
-#define CAN_ID_BOARD1_POS        0x301
+
+#define CAN_CTRL_EXECUTE         0x80
+#define CAN_CTRL_RELATIVE        0x40
+#define CAN_CTRL_STEP_MODE       0x20
+#define CAN_CTRL_RESERVED        0x10
+#define CAN_CTRL_FLAG_MASK       0xF0
+#define CAN_CTRL_MOTOR_MASK      0x0F
 
 #define STATE_INIT               0
 #define STATE_IDLE               1
@@ -37,57 +64,34 @@
 #define ERR_RESERVED             6
 
 #define HOMING_ALL_AXIS          255
-#define LIMIT_SWITCH_ACTIVE_LEVEL 1
-#define LIMIT_SWITCH_DEBOUNCE_TICKS 500
-#define HOMING_INTERVAL_TICKS    300
+#define LIMIT_SWITCH_ACTIVE_HIGH  1
+#define LIMIT_SWITCH_DEBOUNCE_TICKS 20
+#define HOMING_INTERVAL_TICKS    150
 
 #define DIR_POSITIVE             1
-#define DIR_NEGATIVE             0
+#define DIR_NEGATIVE             (-1)
 
 typedef struct {
-    volatile int32_t current_step;
-    volatile int32_t target_step;
-
-    int32_t move_start_step;
-    int32_t move_end_step;
-    int32_t move_step_offset;
-
-    uint16_t move_total_time_ms;
-    uint16_t move_elapsed_time_ms;
-
-    uint8_t moving;
-    uint8_t homing;
-    uint8_t homing_done;
-    uint8_t enabled;
-} MotorState;
-
-// CAN에서 받은 축 1개 명령
-typedef struct {
-    uint8_t motor_id;
-    uint8_t flags;
-    int32_t target_pos;
-    uint16_t speed;
-    uint8_t move_duration_units_from_can;
-} CanTrajectoryCommand;
-
-// 축 4개 이동 명령
-typedef struct {
-    int32_t target_pos[AXIS_COUNT];
+    int32_t target_step[AXIS_COUNT];
     uint16_t speed[AXIS_COUNT];
-    uint8_t flags[AXIS_COUNT];
-    uint8_t move_duration_units;
-} MultiAxisMoveCommand;
+    uint16_t duration_ms;
+} TrajectoryPoint;
 
-extern MotorState axis[AXIS_COUNT];
-extern volatile uint8_t global_motor_enabled;
-extern volatile uint8_t global_motor_state;
-extern volatile uint8_t global_motor_error;
-extern volatile uint8_t global_motor_estop;
+extern volatile uint8_t g_enabled;
+extern volatile uint8_t g_estop;
+extern volatile uint8_t g_state;
+extern volatile uint8_t g_error_code;
+extern volatile uint8_t g_motion_active;
+extern volatile uint8_t g_homing_active;
+extern volatile uint8_t g_homing_done_bits;
+extern volatile int32_t g_current_step[AXIS_COUNT];
+extern volatile int32_t g_target_step[AXIS_COUNT];
+extern volatile int32_t g_motion_start_step[AXIS_COUNT];
 extern volatile uint32_t global_tick_ms;
 
-void system_update_state(void);
 uint8_t system_homing_done_bits(void);
 uint8_t system_enabled_status(void);
 uint8_t system_first_moving_axis(void);
+uint8_t system_all_homed(void);
 
 #endif

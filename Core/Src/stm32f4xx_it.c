@@ -17,6 +17,7 @@ static void tim2_init_10us(void)
     TIM2->ARR = 10 - 1;   // 10us마다 interrupt 발생
     TIM2->DIER |= TIM_DIER_UIE;       // interrupt enable
     TIM2->CR1 |= TIM_CR1_CEN;         // TIM2 카운터 시작
+    NVIC_SetPriority(TIM2_IRQn, 2);
     NVIC_EnableIRQ(TIM2_IRQn);        // TIM2 인터럽트 NVIC 활성화
 }
 
@@ -29,6 +30,7 @@ static void tim3_init_1ms(void)
     TIM3->ARR = 1000 - 1;     // 1ms마다 interrupt 발생
     TIM3->DIER |= TIM_DIER_UIE; // interrupt enable
     TIM3->CR1 |= TIM_CR1_CEN;   // TIM3 카운터 시작
+    NVIC_SetPriority(TIM3_IRQn, 2);
     NVIC_EnableIRQ(TIM3_IRQn);  // TIM3 인터럽트 NVIC 활성화
 }
 
@@ -60,20 +62,10 @@ void SysTick_Handler(void)
 
 // 10us
 void TIM2_IRQHandler(void)
-{   
-    // Update interrupt flag This bit is set by hardware on an update event. It is cleared by software.
+{
     if (TIM2->SR & (1 << 0)) {
-        TIM2->SR &= ~(1 << 0);  // UIF clear: 0쓰면 update interrupt flag 초기화
-
-        // 모터가 estop 아니고, enable이면 실행
-        if (!global_motor_estop && global_motor_enabled) 
-        {
-            stepper_10us_interrupt();  // 10us 주기로 스텝 펄스 생성
-        }
-        else
-        {
-            stepper_stop_all();  // 비상정지/비활성 상태에서는 모든 축 정지
-        }
+        TIM2->SR &= ~(1 << 0);
+        stepper_10us_interrupt();
     }
 }
 
@@ -82,8 +74,9 @@ void TIM3_IRQHandler(void)
 {
     if (TIM3->SR & (1 << 0)) {
         TIM3->SR &= ~(1 << 0);  // UIF clear: update interrupt flag 초기화
-        if (!global_motor_estop && global_motor_enabled && global_motor_error == ERR_NONE) {
-            trajectory_1ms_interrupt();  // 1ms 주기로 궤적 보간 목표 위치 갱신
-        }
+
+        trajectory_1ms_interrupt();  // 1ms 주기로 궤적 보간 목표 위치 갱신
+        stepper_1ms_interrupt(); // 1ms주기로 리미트 스위치 판단
+        stepper_homing_1ms();
     }
 }

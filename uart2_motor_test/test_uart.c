@@ -1,20 +1,32 @@
 #include "stm32f4xx.h"
 #include <stdint.h>
 
-#define SYSCLK_HZ 96000000U
-#define UART_BAUD 115200U
-#define UART_PCLK_HZ (SYSCLK_HZ / 2U)
+#define SYSCLK_HZ 96000000
+#define UART_BAUD 115200
+#define UART_PCLK_HZ (SYSCLK_HZ / 2)
 
-#define AXIS_COUNT 4U
-#define DEFAULT_STEP_PULSES 400U
-#define MAX_STEP_PULSES 20000U
-#define STEP_HIGH_US 5U
-#define STEP_LOW_US 995U
+#define AXIS_COUNT 4
+#define DEFAULT_STEP_PULSES 400
+#define MAX_STEP_PULSES 20000
+#define STEP_HIGH_US 5
+#define STEP_LOW_US 995
 
-#define TMC_REG_GCONF       0x00U
-#define TMC_REG_IHOLD_IRUN  0x10U
-#define TMC_REG_CHOPCONF    0x6CU
-#define TMC_REG_PWMCONF     0x70U
+#define TMC_MOSI_PORT GPIOB
+#define TMC_MOSI_PIN  1
+#define TMC_MISO_PORT GPIOB
+#define TMC_MISO_PIN  0
+#define TMC_CLK_PORT  GPIOB
+#define TMC_CLK_PIN   5
+#define MOTOR_EN_PORT GPIOB
+#define MOTOR_EN_PIN  3
+
+#define TMC_REG_GCONF       0x00
+#define TMC_REG_GSTAT       0x01
+#define TMC_REG_IOIN        0x04
+#define TMC_REG_IHOLD_IRUN  0x10
+#define TMC_REG_CHOPCONF    0x6C
+#define TMC_REG_DRV_STATUS  0x6F
+#define TMC_REG_PWMCONF     0x70
 
 typedef struct {
     GPIO_TypeDef *step_port;
@@ -26,7 +38,7 @@ typedef struct {
 } AxisPins;
 
 static const AxisPins axis_pins[AXIS_COUNT] = {
-    {GPIOA, 1,  GPIOA, 0,  GPIOA, 5},
+    {GPIOA, 1,  GPIOA, 0,  GPIOB, 12},
     {GPIOC, 15, GPIOC, 14, GPIOA, 4},
     {GPIOB, 9,  GPIOB, 8,  GPIOB, 10},
     {GPIOB, 7,  GPIOB, 6,  GPIOB, 2},
@@ -36,34 +48,34 @@ static uint8_t motors_enabled;
 
 static void clock_init_96mhz(void)
 {
-    RCC->CR |= (1U << 0);
-    while ((RCC->CR & (1U << 1)) == 0) {}
+    RCC->CR |= (1 << 0);
+    while ((RCC->CR & (1 << 1)) == 0) {}
 
-    RCC->APB1ENR |= (1U << 28);
+    RCC->APB1ENR |= (1 << 28);
     (void)RCC->APB1ENR;
-    PWR->CR |= (3U << 14);
+    PWR->CR |= (3 << 14);
 
-    FLASH->ACR = (1U << 10) | (1U << 9) | (1U << 8) | (3U << 0);
+    FLASH->ACR = (1 << 10) | (1 << 9) | (1 << 8) | (3 << 0);
 
-    RCC->CR &= ~(1U << 24);
-    while (RCC->CR & (1U << 25)) {}
+    RCC->CR &= ~(1 << 24);
+    while (RCC->CR & (1 << 25)) {}
 
-    RCC->PLLCFGR = (8U << 24) |
-                   (0U << 22) |
-                   (1U << 16) |
-                   (192U << 6) |
-                   (8U << 0);
+    RCC->PLLCFGR = (8 << 24) |
+                   (0 << 22) |
+                   (1 << 16) |
+                   (192 << 6) |
+                   (8 << 0);
 
-    RCC->CFGR = (0U << 13) |
-                (4U << 10) |
-                (0U << 4);
+    RCC->CFGR = (0 << 13) |
+                (4 << 10) |
+                (0 << 4);
 
-    RCC->CR |= (1U << 24);
-    while ((RCC->CR & (1U << 25)) == 0) {}
+    RCC->CR |= (1 << 24);
+    while ((RCC->CR & (1 << 25)) == 0) {}
 
-    RCC->CFGR &= ~(0x3U << 0);
-    RCC->CFGR |= (0x2U << 0);
-    while (((RCC->CFGR >> 2) & 0x3U) != 0x2U) {}
+    RCC->CFGR &= ~(0x3 << 0);
+    RCC->CFGR |= (0x2 << 0);
+    while (((RCC->CFGR >> 2) & 0x3) != 0x2) {}
 
     SystemCoreClock = SYSCLK_HZ;
 }
@@ -78,48 +90,48 @@ static void dwt_delay_init(void)
 static void delay_us(uint32_t us)
 {
     uint32_t start = DWT->CYCCNT;
-    uint32_t ticks = us * (SYSCLK_HZ / 1000000U);
+    uint32_t ticks = us * (SYSCLK_HZ / 1000000);
     while ((uint32_t)(DWT->CYCCNT - start) < ticks) {}
 }
 
 static void gpio_set(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->BSRR = (1U << pin);
+    port->BSRR = (1 << pin);
 }
 
 static void gpio_clear(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->BSRR = (1U << (pin + 16U));
+    port->BSRR = (1 << (pin + 16));
 }
 
 static void gpio_output(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->MODER &= ~(3U << (pin * 2U));
-    port->MODER |=  (1U << (pin * 2U));
-    port->OTYPER &= ~(1U << pin);
-    port->OSPEEDR &= ~(3U << (pin * 2U));
-    port->OSPEEDR |=  (2U << (pin * 2U));
-    port->PUPDR &= ~(3U << (pin * 2U));
+    port->MODER &= ~(3 << (pin * 2));
+    port->MODER |=  (1 << (pin * 2));
+    port->OTYPER &= ~(1 << pin);
+    port->OSPEEDR &= ~(3 << (pin * 2));
+    port->OSPEEDR |=  (2 << (pin * 2));
+    port->PUPDR &= ~(3 << (pin * 2));
 }
 
 static void gpio_input_pullup(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->MODER &= ~(3U << (pin * 2U));
-    port->PUPDR &= ~(3U << (pin * 2U));
-    port->PUPDR |=  (1U << (pin * 2U));
+    port->MODER &= ~(3 << (pin * 2));
+    port->PUPDR &= ~(3 << (pin * 2));
+    port->PUPDR |=  (1 << (pin * 2));
 }
 
 static void gpio_af7(GPIO_TypeDef *port, uint8_t pin)
 {
-    port->MODER &= ~(3U << (pin * 2U));
-    port->MODER |=  (2U << (pin * 2U));
-    port->OTYPER &= ~(1U << pin);
-    port->OSPEEDR &= ~(3U << (pin * 2U));
-    port->OSPEEDR |=  (3U << (pin * 2U));
-    port->PUPDR &= ~(3U << (pin * 2U));
-    port->PUPDR |=  (1U << (pin * 2U));
-    port->AFR[pin / 8U] &= ~(0xFU << ((pin % 8U) * 4U));
-    port->AFR[pin / 8U] |=  (0x7U << ((pin % 8U) * 4U));
+    port->MODER &= ~(3 << (pin * 2));
+    port->MODER |=  (2 << (pin * 2));
+    port->OTYPER &= ~(1 << pin);
+    port->OSPEEDR &= ~(3 << (pin * 2));
+    port->OSPEEDR |=  (3 << (pin * 2));
+    port->PUPDR &= ~(3 << (pin * 2));
+    port->PUPDR |=  (1 << (pin * 2));
+    port->AFR[pin / 8] &= ~(0xF << ((pin % 8) * 4));
+    port->AFR[pin / 8] |=  (0x7 << ((pin % 8) * 4));
 }
 
 static void uart2_init(void)
@@ -135,19 +147,19 @@ static void uart2_init(void)
     USART2->CR1 = 0;
     USART2->CR2 = 0;
     USART2->CR3 = 0;
-    USART2->BRR = (UART_PCLK_HZ + (UART_BAUD / 2U)) / UART_BAUD;
+    USART2->BRR = (UART_PCLK_HZ + (UART_BAUD / 2)) / UART_BAUD;
     USART2->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
 }
 
 static uint8_t uart2_readable(void)
 {
-    return (USART2->SR & USART_SR_RXNE) ? 1U : 0U;
+    return (USART2->SR & USART_SR_RXNE) ? 1 : 0;
 }
 
 static char uart2_getc(void)
 {
     while (!uart2_readable()) {}
-    return (char)(USART2->DR & 0xFFU);
+    return (char)(USART2->DR & 0xFF);
 }
 
 static void uart2_putc(char ch)
@@ -174,11 +186,30 @@ static void uart2_put_u32(uint32_t value)
     }
 
     while (value && len < sizeof(buf)) {
-        buf[len++] = (char)('0' + (value % 10U));
-        value /= 10U;
+        buf[len++] = (char)('0' + (value % 10));
+        value /= 10;
     }
     while (len) {
         uart2_putc(buf[--len]);
+    }
+}
+
+static void uart2_put_hex8(uint8_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+
+    uart2_puts("0x");
+    uart2_putc(hex[(value >> 4) & 0x0F]);
+    uart2_putc(hex[value & 0x0F]);
+}
+
+static void uart2_put_hex32(uint32_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+
+    uart2_puts("0x");
+    for (int8_t shift = 28; shift >= 0; shift -= 4) {
+        uart2_putc(hex[(value >> (uint8_t)shift) & 0x0F]);
     }
 }
 
@@ -195,25 +226,25 @@ static void motor_gpio_init(void)
         gpio_output(axis_pins[i].cs_port, axis_pins[i].cs_pin);
     }
 
-    gpio_output(GPIOB, 1);  // TMC MOSI
-    gpio_input_pullup(GPIOB, 0);  // TMC MISO
-    gpio_output(GPIOA, 6);  // TMC CLK
-    gpio_set(GPIOA, 6);
+    gpio_output(TMC_MOSI_PORT, TMC_MOSI_PIN);
+    gpio_input_pullup(TMC_MISO_PORT, TMC_MISO_PIN);
+    gpio_output(TMC_CLK_PORT, TMC_CLK_PIN);
+    gpio_set(TMC_CLK_PORT, TMC_CLK_PIN);
 
-    gpio_set(GPIOB, 3);  // MOTOR_EN active-low, boot disabled
-    gpio_output(GPIOB, 3);
+    gpio_set(MOTOR_EN_PORT, MOTOR_EN_PIN);  // MOTOR_EN active-low, boot disabled
+    gpio_output(MOTOR_EN_PORT, MOTOR_EN_PIN);
     motors_enabled = 0;
 }
 
 static void motor_enable(void)
 {
-    gpio_clear(GPIOB, 3);
+    gpio_clear(MOTOR_EN_PORT, MOTOR_EN_PIN);
     motors_enabled = 1;
 }
 
 static void motor_disable(void)
 {
-    gpio_set(GPIOB, 3);
+    gpio_set(MOTOR_EN_PORT, MOTOR_EN_PIN);
     motors_enabled = 0;
 }
 
@@ -226,27 +257,105 @@ static void tmc_cs(uint8_t axis, uint8_t selected)
     }
 }
 
+static uint8_t tmc_transfer_byte(uint8_t tx)
+{
+    uint8_t rx = 0;
+
+    for (int8_t bit = 7; bit >= 0; bit--) {
+        gpio_clear(TMC_CLK_PORT, TMC_CLK_PIN);
+        if (tx & (uint8_t)(1 << bit)) {
+            gpio_set(TMC_MOSI_PORT, TMC_MOSI_PIN);
+        } else {
+            gpio_clear(TMC_MOSI_PORT, TMC_MOSI_PIN);
+        }
+        delay_us(2);
+        gpio_set(TMC_CLK_PORT, TMC_CLK_PIN);
+        delay_us(2);
+        if (TMC_MISO_PORT->IDR & (1 << TMC_MISO_PIN)) {
+            rx |= (uint8_t)(1 << bit);
+        }
+    }
+
+    return rx;
+}
+
+static uint8_t tmc_transfer(uint8_t axis, uint8_t addr, uint32_t tx_data, uint32_t *rx_data)
+{
+    uint8_t status;
+    uint32_t rx = 0;
+
+    if (axis >= AXIS_COUNT) return 0;
+
+    tmc_cs(axis, 1);
+    delay_us(1);
+    status = tmc_transfer_byte(addr);
+    rx |= (uint32_t)tmc_transfer_byte((uint8_t)(tx_data >> 24)) << 24;
+    rx |= (uint32_t)tmc_transfer_byte((uint8_t)(tx_data >> 16)) << 16;
+    rx |= (uint32_t)tmc_transfer_byte((uint8_t)(tx_data >> 8)) << 8;
+    rx |= (uint32_t)tmc_transfer_byte((uint8_t)tx_data);
+    delay_us(1);
+    tmc_cs(axis, 0);
+    delay_us(10);
+
+    if (rx_data != 0) *rx_data = rx;
+    return status;
+}
+
+static uint8_t tmc_read(uint8_t axis, uint8_t reg, uint32_t *value)
+{
+    (void)tmc_transfer(axis, (uint8_t)(reg & 0x7F), 0, 0);
+    return tmc_transfer(axis, (uint8_t)(reg & 0x7F), 0, value);
+}
+
+static void print_tmc_reg(uint8_t axis, const char *name, uint8_t reg)
+{
+    uint32_t value;
+    uint8_t status = tmc_read(axis, reg, &value);
+
+    uart2_puts("  ");
+    uart2_puts(name);
+    uart2_putc('=');
+    uart2_put_hex32(value);
+    uart2_puts(" spi_status=");
+    uart2_put_hex8(status);
+    uart2_puts("\r\n");
+}
+
+static void print_tmc_status(void)
+{
+    for (uint8_t axis = 0; axis < AXIS_COUNT; axis++) {
+        uart2_puts("TMC axis");
+        uart2_put_u32((uint32_t)axis + 1);
+        uart2_puts("\r\n");
+        print_tmc_reg(axis, "GSTAT", TMC_REG_GSTAT);
+        print_tmc_reg(axis, "IOIN", TMC_REG_IOIN);
+        print_tmc_reg(axis, "DRV_STATUS", TMC_REG_DRV_STATUS);
+        print_tmc_reg(axis, "CHOPCONF", TMC_REG_CHOPCONF);
+    }
+    uart2_puts("> ");
+}
+
 static void tmc_write(uint8_t axis, uint8_t addr, uint32_t data)
 {
     uint8_t tx[5];
 
-    tx[0] = addr | 0x80U;
+    tx[0] = addr | 0x80;
     tx[1] = (uint8_t)(data >> 24);
     tx[2] = (uint8_t)(data >> 16);
     tx[3] = (uint8_t)(data >> 8);
     tx[4] = (uint8_t)data;
 
     tmc_cs(axis, 1);
-    for (uint8_t byte = 0; byte < 5U; byte++) {
+    for (uint8_t byte = 0; byte < 5; byte++) {
         for (int8_t bit = 7; bit >= 0; bit--) {
-            gpio_clear(GPIOA, 6);
-            if (tx[byte] & (uint8_t)(1U << bit)) {
-                gpio_set(GPIOB, 1);
+            gpio_clear(TMC_CLK_PORT, TMC_CLK_PIN);
+            if (tx[byte] & (uint8_t)(1 << bit)) {
+                gpio_set(TMC_MOSI_PORT, TMC_MOSI_PIN);
             } else {
-                gpio_clear(GPIOB, 1);
+                gpio_clear(TMC_MOSI_PORT, TMC_MOSI_PIN);
             }
             delay_us(2);
-            gpio_set(GPIOA, 6);
+            gpio_set(TMC_CLK_PORT, TMC_CLK_PIN);
             delay_us(2);
         }
     }
@@ -259,10 +368,10 @@ static void tmc_init_all(void)
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         if (i == 3) continue;
         
-        tmc_write(i, TMC_REG_GCONF, 0x00000000U);
-        tmc_write(i, TMC_REG_IHOLD_IRUN, 0x00061004U);
-        tmc_write(i, TMC_REG_CHOPCONF, 0x040100C3U);
-        tmc_write(i, TMC_REG_PWMCONF, 0x00050480U);
+        tmc_write(i, TMC_REG_GCONF, 0x00000000);
+        tmc_write(i, TMC_REG_IHOLD_IRUN, 0x00061004);
+        tmc_write(i, TMC_REG_CHOPCONF, 0x040100C3);
+        tmc_write(i, TMC_REG_PWMCONF, 0x00050480);
     }
 }
 
@@ -278,7 +387,7 @@ static uint8_t stop_requested(void)
 {
     if (!uart2_readable()) return 0;
 
-    char ch = (char)(USART2->DR & 0xFFU);
+    char ch = (char)(USART2->DR & 0xFF);
     if (ch == 's' || ch == 'S') {
         motor_disable();
         uart2_puts("\r\nSTOP\r\n> ");
@@ -331,7 +440,7 @@ static uint8_t parse_u32(const char *str, uint32_t *value)
 
     while (*str >= '0' && *str <= '9') {
         found = 1;
-        result = (result * 10U) + (uint32_t)(*str - '0');
+        result = (result * 10) + (uint32_t)(*str - '0');
         str++;
     }
 
@@ -346,11 +455,15 @@ static void print_help(void)
 {
     uart2_puts("\r\nUART2 motor test, PA2 TX / PA3 RX, 115200 8N1\r\n");
     uart2_puts("Wire: USB-TTL TX->PA3, RX->PA2, GND->GND, 3.3V level\r\n");
+    uart2_puts("TMC SPI: MISO PB0, CLK PB5, MOSI PB1, MOTEN PB3\r\n");
+    uart2_puts("CS: axis1 PB12, axis2 PA4, axis3 PB10, axis4 PB2\r\n");
     uart2_puts("Commands:\r\n");
     uart2_puts("  E       enable motor drivers\r\n");
     uart2_puts("  D       disable motor drivers\r\n");
     uart2_puts("  S       stop/disable during a move\r\n");
+    uart2_puts("  tmc     read TMC5160 registers\r\n");
     uart2_puts("  1+      arm axis 2 forward, default 400 pulses\r\n");
+    uart2_puts("  j1+1000 same as 1+1000\r\n");
     uart2_puts("  1-      arm axis 2 reverse, default 400 pulses\r\n");
     uart2_puts("  2+ 2-   arm axis 3 forward/reverse\r\n");
     uart2_puts("  3+ 3-   arm axis 4 forward/reverse\r\n");
@@ -386,6 +499,27 @@ static void run_command(char *line)
     if ((line[0] == 's' || line[0] == 'S') && line[1] == '\0') {
         motor_disable();
         uart2_puts("STOP\r\n> ");
+        return;
+    }
+
+    if ((line[0] == 't' || line[0] == 'T') &&
+        (line[1] == 'm' || line[1] == 'M') &&
+        (line[2] == 'c' || line[2] == 'C') &&
+        line[3] == '\0') {
+        print_tmc_status();
+        return;
+    }
+
+    if ((line[0] == 'j' || line[0] == 'J') &&
+        line[1] >= '1' && line[1] <= '4' &&
+        (line[2] == '+' || line[2] == '-')) {
+        uint32_t pulses;
+        if (!parse_u32(&line[3], &pulses)) {
+            uart2_puts("ERR: bad pulse count\r\n> ");
+            return;
+        }
+        move_axis((uint8_t)(line[1] - '1'), (uint8_t)(line[2] == '+'), pulses);
+        uart2_puts("> ");
         return;
     }
 
@@ -429,7 +563,7 @@ static void terminal_loop(void)
             continue;
         }
 
-        if (len < (sizeof(line) - 1U)) {
+        if (len < (sizeof(line) - 1)) {
             line[len++] = ch;
             uart2_putc(ch);
         }
