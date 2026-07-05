@@ -192,7 +192,7 @@ static void handle_board_move(const CanFrame *frame)
         return;
     }
 
-    result = trajectory_stage_axis(motor_id, target_step, speed, duration_5ms);
+    result = trajectory_add_axis_command(motor_id, target_step, speed, duration_5ms);
     if (result == TRAJECTORY_STAGING_INVALID) {
         enter_error(ERR_INVALID_CMD);
         return;

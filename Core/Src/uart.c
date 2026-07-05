@@ -761,7 +761,7 @@ static void handle_move_command(const char *line)
 
     duration_5ms = (uint8_t)((duration_ms + 4) / 5);
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        result = trajectory_stage_axis(i, targets[i], 0, duration_5ms);
+        result = trajectory_add_axis_command(i, targets[i], 0, duration_5ms);
         if (result == TRAJECTORY_STAGING_INVALID) {
             uart2_puts("ERR: invalid move\n");
             print_prompt();
