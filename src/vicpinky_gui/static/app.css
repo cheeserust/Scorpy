@@ -1,6 +1,6 @@
 :root {
   color-scheme: light;
-  --bg: #f4f6fa;
+  --bg: #eef2f6;
   --surface: #ffffff;
   --surface-strong: #f9fbfd;
   --text: #18202f;
@@ -13,7 +13,7 @@
   --warning: #a66400;
   --danger: #c92a2a;
   --danger-strong: #9e1f1f;
-  --shadow: 0 8px 24px rgba(24, 32, 47, 0.08);
+  --shadow: 0 8px 22px rgba(24, 32, 47, 0.07);
 }
 
 * {
@@ -136,6 +136,11 @@ label {
   color: #ffe0e0;
 }
 
+.connection-pill.recovered {
+  background: rgba(166, 100, 0, 0.30);
+  color: #fff2d6;
+}
+
 .danger-button {
   min-width: 92px;
   border-color: transparent;
@@ -152,7 +157,7 @@ label {
   display: grid;
   grid-template-columns: minmax(340px, 0.9fr) minmax(420px, 1.35fr);
   gap: 16px;
-  width: min(1440px, 100%);
+  width: min(1520px, 100%);
   margin: 0 auto;
   padding: 16px;
 }
@@ -188,6 +193,67 @@ label {
   line-height: 1.2;
 }
 
+.overview-panel {
+  grid-column: 1 / -1;
+  padding: 12px;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.overview-card {
+  min-width: 0;
+  min-height: 118px;
+  border: 1px solid var(--border);
+  border-top-width: 5px;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  padding: 12px;
+}
+
+.overview-card.success {
+  border-top-color: var(--success);
+}
+
+.overview-card.warning {
+  border-top-color: var(--warning);
+}
+
+.overview-card.danger {
+  border-top-color: var(--danger);
+}
+
+.overview-card.neutral {
+  border-top-color: var(--blue);
+}
+
+.overview-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.overview-value {
+  margin-top: 8px;
+  font-size: 24px;
+  font-weight: 950;
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+}
+
+.overview-meta {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .meta-line {
   margin-top: 4px;
   color: var(--muted);
@@ -198,14 +264,19 @@ label {
 
 .mission-form {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
+}
+
+.mission-form label {
+  grid-column: span 2;
 }
 
 .form-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  grid-column: span 2;
   align-self: end;
 }
 
@@ -277,7 +348,7 @@ label {
 
 .fsm-steps {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
   gap: 6px;
   margin-top: 10px;
 }
@@ -338,6 +409,10 @@ label {
   overflow-wrap: anywhere;
 }
 
+.compact-status {
+  margin-top: 0;
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -383,9 +458,107 @@ label {
   color: var(--danger);
 }
 
+.manual-panel {
+  grid-column: 1 / -1;
+}
+
+.manual-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+  gap: 16px;
+}
+
+.manual-section {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.manual-section-heading {
+  display: flex;
+  min-height: 42px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.manual-section-heading h3 {
+  margin-bottom: 3px;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.manual-section-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.manual-section-heading button {
+  min-width: 104px;
+}
+
+.manual-control-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.manual-control-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(160px, 1fr) 86px;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  min-height: 48px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.manual-control-label {
+  min-width: 0;
+}
+
+.manual-control-label strong {
+  display: block;
+  line-height: 1.15;
+}
+
+.manual-control-label span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.manual-control-row input[type="range"] {
+  min-height: 28px;
+  padding: 0;
+}
+
+.manual-number {
+  min-height: 36px;
+  padding: 6px 8px;
+  text-align: right;
+}
+
+.manual-actions {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.55fr) minmax(130px, 0.45fr);
+  gap: 10px;
+  align-items: end;
+  margin-top: 14px;
+}
+
+.manual-actions.gripper-actions {
+  grid-template-columns: minmax(100px, 0.45fr) minmax(100px, 0.45fr) minmax(130px, 0.55fr);
+}
+
 .board-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px;
 }
 
@@ -452,8 +625,64 @@ label {
 }
 
 .joint-panel,
-.flow-panel {
+.flow-panel,
+.link-panel {
   align-self: start;
+}
+
+.disconnect-summary {
+  margin-top: 16px;
+}
+
+.mini-event-list {
+  display: grid;
+  gap: 8px;
+  max-height: 194px;
+  margin: 0;
+  overflow: auto;
+  padding: 0;
+  list-style: none;
+}
+
+.mini-event-list li {
+  display: grid;
+  grid-template-columns: 74px minmax(92px, 0.5fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-left-width: 5px;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.mini-event-list li.success {
+  border-left-color: var(--success);
+}
+
+.mini-event-list li.warning {
+  border-left-color: var(--warning);
+}
+
+.mini-event-list li.error {
+  border-left-color: var(--danger);
+}
+
+.mini-event-list span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.mini-event-list strong {
+  font-size: 12px;
+}
+
+.mini-event-list em {
+  min-width: 0;
+  color: var(--text);
+  font-style: normal;
 }
 
 .table-wrap {
@@ -525,7 +754,7 @@ label {
 
 .log-columns {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -570,6 +799,10 @@ label {
     grid-template-columns: 1fr;
   }
 
+  .overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .board-grid {
     grid-template-columns: repeat(2, minmax(180px, 1fr));
   }
@@ -596,9 +829,15 @@ label {
 
   .mission-form,
   .command-bar,
+  .manual-layout,
+  .manual-actions,
+  .manual-actions.gripper-actions,
+  .manual-control-row,
+  .overview-grid,
   .board-grid,
   .log-columns,
-  .fsm-steps {
+  .fsm-steps,
+  .mini-event-list li {
     grid-template-columns: 1fr;
   }
 

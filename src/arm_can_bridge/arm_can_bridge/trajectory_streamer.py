@@ -68,6 +68,7 @@ class TrajectoryStreamer:
 
         total = len(batch_list)
         expected_motion_time_s = 0.0
+        motion_started_at_s: float | None = None
 
         for index, batch in enumerate(batch_list):
             self._raise_if_cancelled(cancel_requested)
@@ -97,6 +98,8 @@ class TrajectoryStreamer:
 
                 for frame in batch.frames:
                     self._raise_if_cancelled(cancel_requested)
+                    if motion_started_at_s is None:
+                        motion_started_at_s = time.monotonic()
                     self._transport.send_frame(frame)
                     sent_any = True
 
@@ -114,8 +117,15 @@ class TrajectoryStreamer:
             if progress_callback is not None:
                 progress_callback(index + 1, total, batch)
 
+        if motion_started_at_s is None:
+            raise TrajectoryStreamingError('No CAN frames were sent')
+
+        earliest_completion_s = motion_started_at_s + expected_motion_time_s
+        min_wait_s = max(0.0, earliest_completion_s - time.monotonic())
+
         self._wait_for_completion(
             timeout_s=expected_motion_time_s + self._completion_grace_s,
+            min_wait_s=min_wait_s,
             cancel_requested=cancel_requested,
         )
 
@@ -154,14 +164,21 @@ class TrajectoryStreamer:
         self,
         *,
         timeout_s: float,
+        min_wait_s: float,
         cancel_requested: Optional[CancelPredicate],
     ) -> None:
-        deadline = time.monotonic() + timeout_s
+        now = time.monotonic()
+        deadline = now + timeout_s
+        completion_allowed_at = now + max(0.0, min_wait_s)
 
         while rclpy.ok() and time.monotonic() < deadline:
             self._raise_if_cancelled(cancel_requested)
 
-            if self._board_state.is_trajectory_complete():
+            now = time.monotonic()
+            if (
+                now >= completion_allowed_at
+                and self._board_state.is_trajectory_complete()
+            ):
                 return
 
             if self._board_state.has_error():

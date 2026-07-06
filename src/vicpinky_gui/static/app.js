@@ -1,6 +1,11 @@
 const state = {
   configApplied: false,
   polling: false,
+  manualConfigs: {},
+  manualDirty: { arm: false, gripper: false },
+  manualInitialized: { arm: false, gripper: false },
+  manualSending: { arm: false, gripper: false },
+  lastJointState: null,
 };
 
 const elevatorFsmStates = [
@@ -54,6 +59,14 @@ const formatAge = (ms) => {
   return `${(ms / 1000).toFixed(1)} s`;
 };
 
+const formatDuration = (seconds) => {
+  if (seconds === null || seconds === undefined) return "-";
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return `${minutes} m ${rest} s`;
+};
+
 const formatTime = (iso) => {
   if (!iso) return "-";
   const date = new Date(iso);
@@ -79,6 +92,35 @@ const setConnection = (text, className) => {
   const node = $("connectionStatus");
   node.textContent = text;
   node.className = `connection-pill ${className}`;
+};
+
+const connectionClass = (stateName) => {
+  if (stateName === "ONLINE") return "success";
+  if (stateName === "RECOVERED") return "warning";
+  if (stateName === "LOST") return "danger";
+  return "neutral";
+};
+
+const setOverviewCard = (cardId, className) => {
+  const card = $(cardId);
+  if (card) {
+    card.className = `overview-card ${className}`;
+  }
+};
+
+const manualDom = {
+  arm: {
+    grid: "armManualControls",
+    duration: "manualArmDuration",
+    send: "sendArmManualButton",
+    meta: "manualArmMeta",
+  },
+  gripper: {
+    grid: "gripperManualControls",
+    duration: "manualGripperDuration",
+    send: "sendGripperManualButton",
+    meta: "manualGripperMeta",
+  },
 };
 
 const applyConfig = (config) => {
@@ -114,6 +156,7 @@ const applyConfig = (config) => {
   delivery.value = defaults.delivery_location || "object_place";
 
   renderFlow(config.mission_steps || []);
+  renderManualControls(config.manual || {});
   state.configApplied = true;
 };
 
@@ -138,6 +181,189 @@ const renderFlow = (steps) => {
     .join("");
 };
 
+const renderManualControls = (manualConfig) => {
+  state.manualConfigs = manualConfig || {};
+  renderManualControllerControls("arm");
+  renderManualControllerControls("gripper");
+
+  const armConfig = state.manualConfigs.arm || {};
+  const gripperConfig = state.manualConfigs.gripper || {};
+  $("manualArmDuration").value = armConfig.default_duration_sec ?? 2.0;
+  $("manualGripperDuration").value = gripperConfig.default_duration_sec ?? 1.0;
+  $("manualGripperLoad").value = gripperConfig.default_target_load_raw ?? 500;
+};
+
+const renderManualControllerControls = (controller) => {
+  const config = state.manualConfigs[controller];
+  const dom = manualDom[controller];
+  const grid = $(dom.grid);
+  const joints = Array.isArray(config?.joints) ? config.joints : [];
+
+  if (!joints.length) {
+    grid.innerHTML = `<div class="empty">No manual joints</div>`;
+    return;
+  }
+
+  grid.innerHTML = joints
+    .map((joint) => {
+      const value = Number(joint.default_deg ?? 0).toFixed(1);
+      return `
+        <div class="manual-control-row">
+          <div class="manual-control-label">
+            <strong>${escapeHtml(joint.label)}</strong>
+            <span>${escapeHtml(joint.joint_name)}</span>
+          </div>
+          <input
+            id="manual-${escapeHtml(controller)}-${escapeHtml(joint.key)}-range"
+            type="range"
+            min="${escapeHtml(joint.min_deg)}"
+            max="${escapeHtml(joint.max_deg)}"
+            step="0.1"
+            value="${escapeHtml(value)}"
+          >
+          <input
+            id="manual-${escapeHtml(controller)}-${escapeHtml(joint.key)}-number"
+            class="manual-number"
+            type="number"
+            min="${escapeHtml(joint.min_deg)}"
+            max="${escapeHtml(joint.max_deg)}"
+            step="0.1"
+            value="${escapeHtml(value)}"
+          >
+        </div>
+      `;
+    })
+    .join("");
+
+  joints.forEach((joint) => {
+    const range = $(`manual-${controller}-${joint.key}-range`);
+    const number = $(`manual-${controller}-${joint.key}-number`);
+    const sync = (source) => {
+      const safe = clampManualValue(source.value, joint);
+      const formatted = safe.toFixed(1);
+      range.value = formatted;
+      number.value = formatted;
+      state.manualDirty[controller] = true;
+    };
+
+    range.addEventListener("input", () => sync(range));
+    number.addEventListener("change", () => sync(number));
+  });
+};
+
+const clampManualValue = (value, joint) => {
+  const fallback = Number(joint.default_deg ?? 0);
+  const numeric = Number(value);
+  const min = Number(joint.min_deg);
+  const max = Number(joint.max_deg);
+  return clamp(Number.isFinite(numeric) ? numeric : fallback, min, max);
+};
+
+const setManualControlValue = (controller, joint, valueDeg) => {
+  const range = $(`manual-${controller}-${joint.key}-range`);
+  const number = $(`manual-${controller}-${joint.key}-number`);
+  if (!range || !number) return;
+
+  const safe = clampManualValue(valueDeg, joint);
+  const formatted = safe.toFixed(1);
+  range.value = formatted;
+  number.value = formatted;
+};
+
+const applyManualCurrent = (controller, requireAll) => {
+  const config = state.manualConfigs[controller];
+  const joints = Array.isArray(config?.joints) ? config.joints : [];
+  const jointStateRows = state.lastJointState?.joints || [];
+  if (!joints.length || !jointStateRows.length) return false;
+
+  const byName = new Map();
+  jointStateRows.forEach((joint) => {
+    if (Number.isFinite(Number(joint.position))) {
+      byName.set(joint.name, Number(joint.position));
+    }
+  });
+
+  if (requireAll && joints.some((joint) => !byName.has(joint.joint_name))) {
+    return false;
+  }
+
+  let applied = 0;
+  joints.forEach((joint) => {
+    if (!byName.has(joint.joint_name)) return;
+    setManualControlValue(controller, joint, (byName.get(joint.joint_name) * 180) / Math.PI);
+    applied += 1;
+  });
+
+  return applied > 0;
+};
+
+const syncManualDefaultsFromJoints = () => {
+  ["arm", "gripper"].forEach((controller) => {
+    if (state.manualInitialized[controller] || state.manualDirty[controller]) {
+      return;
+    }
+    if (applyManualCurrent(controller, true)) {
+      state.manualInitialized[controller] = true;
+    }
+  });
+};
+
+const newestManualCommand = (commands) => {
+  const rows = Object.values(commands || {}).filter(Boolean);
+  if (!rows.length) return null;
+
+  return rows.sort((left, right) => {
+    const leftTime = Date.parse(left.finished_at || left.accepted_at || left.sent_at || "");
+    const rightTime = Date.parse(right.finished_at || right.accepted_at || right.sent_at || "");
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  })[0];
+};
+
+const renderManualStatus = (manual) => {
+  const controllers = manual?.controllers || {};
+  const missionActive = Boolean(manual?.mission_active);
+  const arm = controllers.arm || {};
+  const gripper = controllers.gripper || {};
+  const armReady = Boolean(arm.ready);
+  const gripperReady = Boolean(gripper.ready);
+  const anyActive = Boolean(arm.active || gripper.active);
+  const allReady = armReady && gripperReady;
+
+  $("manualArmMeta").textContent = `${armReady ? "Ready" : "Offline"} | ${arm.active ? "Moving" : "Idle"}`;
+  $("manualGripperMeta").textContent = `${gripperReady ? "Ready" : "Offline"} | ${gripper.active ? "Moving" : "Idle"}`;
+
+  $("sendArmManualButton").disabled =
+    missionActive || !armReady || arm.active || state.manualSending.arm;
+  $("sendGripperManualButton").disabled =
+    missionActive || !gripperReady || gripper.active || state.manualSending.gripper;
+
+  if (missionActive) {
+    $("manualReady").textContent = "Mission";
+    $("manualReady").className = "status-chip warning";
+  } else if (anyActive) {
+    $("manualReady").textContent = "Moving";
+    $("manualReady").className = "status-chip warning";
+  } else if (allReady) {
+    $("manualReady").textContent = "Ready";
+    $("manualReady").className = "status-chip success";
+  } else {
+    $("manualReady").textContent = "Offline";
+    $("manualReady").className = "status-chip danger";
+  }
+
+  const last = newestManualCommand(manual?.last_commands);
+  if (!last) {
+    $("manualStatus").textContent = missionActive
+      ? "Mission active | manual send disabled"
+      : "No manual command";
+    return;
+  }
+
+  const result = last.result?.error_string || "";
+  $("manualStatus").textContent =
+    `${last.controller || "manual"} ${last.state || "-"} | ${formatDuration(last.duration_sec)}${result ? ` | ${result}` : ""}`;
+};
+
 const renderMission = (mission) => {
   const status = mission.status;
   const feedback = mission.feedback;
@@ -153,6 +379,7 @@ const renderMission = (mission) => {
     result?.status ||
     (mission.active ? "ACTIVE" : "IDLE");
   $("missionState").textContent = `${stateText} | age ${formatAge(mission.status_age_ms)}`;
+  $("overviewMissionState").textContent = stateText;
 
   const progress = clamp(
     Number(status?.progress ?? feedback?.progress ?? (result?.success ? 1 : 0)),
@@ -161,6 +388,7 @@ const renderMission = (mission) => {
   );
   $("missionProgressText").textContent = `${Math.round(progress * 100)}%`;
   $("missionProgressBar").style.width = `${progress * 100}%`;
+  $("overviewMissionMeta").textContent = `Progress ${Math.round(progress * 100)}% | age ${formatAge(mission.status_age_ms)}`;
 
   $("missionTask").textContent =
     status?.active_task || feedback?.current_task || "-";
@@ -173,6 +401,110 @@ const renderMission = (mission) => {
 
   $("startMissionButton").disabled = !mission.action_ready || mission.active;
   $("cancelMissionButton").disabled = !mission.active;
+
+  const missionHealth = status?.error || result?.success === false
+    ? "danger"
+    : mission.active
+      ? "warning"
+      : result?.success
+        ? "success"
+        : "neutral";
+  setOverviewCard("overviewMissionCard", missionHealth);
+  setOverviewCard("overviewTaskCard", mission.active ? "warning" : "neutral");
+  $("overviewActiveTask").textContent =
+    status?.active_task || feedback?.current_task || "-";
+  $("overviewTaskMeta").textContent =
+    status?.message || feedback?.detail || result?.message || "No active task";
+};
+
+const renderRobotConnection = (connection) => {
+  const stateName = connection?.state || "WAITING";
+  const chipClass = connectionClass(stateName);
+  $("robotLinkState").textContent = stateName;
+  $("robotLinkState").className = `status-chip ${chipClass}`;
+  setOverviewCard("overviewConnectionCard", chipClass);
+  setOverviewCard(
+    "overviewRecoveryCard",
+    stateName === "RECOVERED" ? "warning" : stateName === "LOST" ? "danger" : "neutral",
+  );
+
+  const heartbeat = connection?.heartbeat || {};
+  const lastState =
+    heartbeat.mission_state ||
+    connection?.events_during_disconnect?.at(-1)?.state ||
+    "-";
+  const lastTask =
+    heartbeat.active_task ||
+    connection?.events_during_disconnect?.at(-1)?.active_task ||
+    "-";
+  const progressValue = Number(heartbeat.progress);
+  const progressText = Number.isFinite(progressValue)
+    ? `${Math.round(clamp(progressValue, 0, 1) * 100)}%`
+    : "-";
+
+  $("robotLastSeen").textContent = formatTime(connection?.last_seen);
+  $("robotHeartbeatAge").textContent = formatAge(connection?.heartbeat_age_ms);
+  $("robotLastMissionState").textContent = lastState;
+  $("robotLastTask").textContent = lastTask || "-";
+  $("robotLastProgress").textContent = progressText;
+  $("robotDisconnectedDuration").textContent = formatDuration(
+    connection?.disconnected_duration_s,
+  );
+  $("overviewConnectionState").textContent = stateName;
+  $("overviewConnectionMeta").textContent =
+    `Last seen ${formatTime(connection?.last_seen)} | age ${formatAge(connection?.heartbeat_age_ms)}`;
+  $("overviewRecoveryState").textContent =
+    stateName === "LOST"
+      ? "Disconnected"
+      : stateName === "RECOVERED"
+        ? "Recovered"
+        : connection?.disconnected_duration_s
+          ? "Recovered"
+          : "No Gap";
+  $("overviewRecoveryMeta").textContent =
+    connection?.disconnected_duration_s
+      ? `Gap ${formatDuration(connection.disconnected_duration_s)} | events ${(connection.events_during_disconnect || []).length}`
+      : "No disconnect window";
+
+  if (stateName === "LOST") {
+    $("robotLinkDetail").textContent =
+      `Last seen ${formatTime(connection?.last_seen)} | timeout ${connection?.timeout_s ?? "-"} s`;
+    setConnection(
+      `Robot LOST | last seen ${formatTime(connection?.last_seen)}`,
+      "offline",
+    );
+  } else if (stateName === "RECOVERED") {
+    $("robotLinkDetail").textContent =
+      `Recovered ${formatTime(connection?.recovered_at)} | gap ${formatDuration(connection?.disconnected_duration_s)}`;
+    setConnection(
+      `Robot RECOVERED | gap ${formatDuration(connection?.disconnected_duration_s)}`,
+      "recovered",
+    );
+  } else if (stateName === "ONLINE") {
+    $("robotLinkDetail").textContent =
+      `Online via ${connection?.source || "heartbeat"} | age ${formatAge(connection?.heartbeat_age_ms)}`;
+    setConnection("Robot ONLINE", "online");
+  } else {
+    $("robotLinkDetail").textContent = "Waiting for robot heartbeat";
+    setConnection("Waiting for robot", "offline");
+  }
+
+  const events = connection?.events_during_disconnect || [];
+  $("disconnectEvents").innerHTML = events.length
+    ? events
+        .slice()
+        .reverse()
+        .map(
+          (event) => `
+            <li class="${escapeHtml(event.level || "info")}">
+              <span>${escapeHtml(formatTime(event.time))}</span>
+              <strong>${escapeHtml(event.state || "-")}</strong>
+              <em>${escapeHtml(event.message || "")}</em>
+            </li>
+          `,
+        )
+        .join("")
+    : `<li class="empty">No recovered events</li>`;
 };
 
 const extractElevatorFsmState = (status, feedback) => {
@@ -321,6 +653,20 @@ const renderLogs = (snapshot) => {
         .join("")
     : `<li class="empty">No events</li>`;
 
+  const missionEvents = (snapshot.mission_events || []).slice(-60).reverse();
+  $("missionEventLog").innerHTML = missionEvents.length
+    ? missionEvents
+        .map(
+          (event) => `
+            <li>
+              <span class="log-time">${escapeHtml(formatTime(event.time))} | ${escapeHtml(event.state || "-")} | ${escapeHtml(event.level || "info")}</span>
+              <span class="log-message">${escapeHtml(event.message || "")}</span>
+            </li>
+          `,
+        )
+        .join("")
+    : `<li class="empty">No mission events</li>`;
+
   const armLog = (snapshot.arm.log || []).slice(-40).reverse();
   $("armLog").innerHTML = armLog.length
     ? armLog
@@ -338,11 +684,14 @@ const renderLogs = (snapshot) => {
 
 const renderSnapshot = (snapshot) => {
   applyConfig(snapshot.config);
+  state.lastJointState = snapshot.joints.state;
+  syncManualDefaultsFromJoints();
+  renderRobotConnection(snapshot.robot_connection);
   renderMission(snapshot.mission);
+  renderManualStatus(snapshot.manual);
   renderBoards(snapshot.arm);
   renderJoints(snapshot.joints);
   renderLogs(snapshot);
-  setConnection(`Online | uptime ${Math.floor(snapshot.server.uptime_s)} s`, "online");
 };
 
 const poll = async () => {
@@ -374,6 +723,61 @@ const postArmCommand = async (command) => {
       button.disabled = false;
     });
   }
+};
+
+const readManualPositions = (controller) => {
+  const config = state.manualConfigs[controller];
+  const joints = Array.isArray(config?.joints) ? config.joints : [];
+  const positions = {};
+
+  joints.forEach((joint) => {
+    const number = $(`manual-${controller}-${joint.key}-number`);
+    const value = clampManualValue(number?.value, joint);
+    setManualControlValue(controller, joint, value);
+    positions[joint.key] = value;
+  });
+
+  return positions;
+};
+
+const sendManual = async (controller) => {
+  const dom = manualDom[controller];
+  const payload = {
+    positions_deg: readManualPositions(controller),
+    duration_sec: Number($(dom.duration).value),
+  };
+  if (controller === "gripper") {
+    payload.target_load_raw = Number($("manualGripperLoad").value);
+  }
+
+  state.manualSending[controller] = true;
+  $(dom.send).disabled = true;
+
+  try {
+    await api(`/api/manual/${controller}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.manualDirty[controller] = false;
+    await poll();
+  } catch (error) {
+    $("manualStatus").textContent = error.message;
+    setConnection(error.message, "offline");
+  } finally {
+    state.manualSending[controller] = false;
+    await poll();
+  }
+};
+
+const useCurrentManual = (controller) => {
+  if (applyManualCurrent(controller, true)) {
+    state.manualInitialized[controller] = true;
+    state.manualDirty[controller] = false;
+    $("manualStatus").textContent = `${controller} values loaded from joint state`;
+    return;
+  }
+
+  $("manualStatus").textContent = `${controller} joint state is not available`;
 };
 
 const startMission = async (event) => {
@@ -411,6 +815,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("cancelMissionButton").addEventListener("click", cancelMission);
   $("statusButton").addEventListener("click", () => postArmCommand("status"));
   $("estopTopButton").addEventListener("click", () => postArmCommand("estop"));
+  $("sendArmManualButton").addEventListener("click", () => sendManual("arm"));
+  $("sendGripperManualButton").addEventListener("click", () => sendManual("gripper"));
+  $("useCurrentArmButton").addEventListener("click", () => useCurrentManual("arm"));
+  $("useCurrentGripperButton").addEventListener("click", () => useCurrentManual("gripper"));
 
   document.querySelectorAll("[data-arm-command]").forEach((button) => {
     button.addEventListener("click", () => {

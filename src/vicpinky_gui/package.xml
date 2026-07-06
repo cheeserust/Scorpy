@@ -10,10 +10,12 @@
 
   <depend>action_msgs</depend>
   <depend>ament_index_python</depend>
+  <depend>control_msgs</depend>
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>trajectory_msgs</depend>
   <depend>vicpinky_interfaces</depend>
 
   <exec_depend>launch</exec_depend>

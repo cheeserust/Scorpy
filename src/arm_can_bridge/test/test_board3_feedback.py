@@ -50,9 +50,21 @@ def test_assembler_returns_snapshot_after_three_valid_groups():
 def test_assembler_ignores_invalid_groups():
     assembler = Board3PositionFeedbackAssembler()
 
-    assert assembler.update(make_group(1, 100, 200, 300, flags=0x00)) is None
+    assert assembler.update(make_group(1, 100, 200, 300, flags=0x01)) is None
     assert assembler.update(make_group(2, 400, 500, 600)) is None
     assert assembler.update(make_group(3, 700, 800, 900)) is None
+
+
+def test_assembler_accepts_v1_1_zero_reserved_flags():
+    assembler = Board3PositionFeedbackAssembler()
+
+    assert assembler.update(make_group(1, 100, 200, 300, flags=0x00)) is None
+    assert assembler.update(make_group(2, 400, 500, 600, flags=0x00)) is None
+    snapshot = assembler.update(make_group(3, 700, 800, 900, flags=0x00))
+
+    assert snapshot is not None
+    assert snapshot.raw_flags == (0x00, 0x00, 0x00)
+    assert snapshot.status_codes == (0,) * 9
 
 
 def test_assembler_discards_stale_partial_cycle():

@@ -17,6 +17,7 @@ from arm_can_bridge.can_protocol import (
     pack_clear_error,
     pack_enable,
     pack_estop,
+    pack_gripper_home,
     pack_homing,
     pack_position_command,
     rad_to_angle_raw,
@@ -242,30 +243,33 @@ def test_control_commands_use_final_can_ids_and_payload_lengths():
     assert pack_estop().data == bytes.fromhex('0100000000000000')
 
     assert pack_enable(True).can_id == 0x010
-    assert pack_enable(True).data == bytes.fromhex('01FF000000000000')
-    assert pack_enable(False).data == bytes.fromhex('00FF000000000000')
+    assert pack_enable(True).data == bytes.fromhex('0100000000000000')
+    assert pack_enable(True, board_id=3).data == bytes.fromhex(
+        '0100000000000000'
+    )
+    assert pack_enable(False).data == bytes.fromhex('0000000000000000')
 
     assert pack_homing().can_id == 0x020
-    assert pack_homing().data == bytes.fromhex('FFFF000000000000')
+    assert pack_homing().data == bytes.fromhex('FF00000000000000')
 
     assert pack_clear_error().can_id == 0x030
-    assert pack_clear_error().data == bytes.fromhex('FFFF000000000000')
-
-    assert pack_homing(board_id=1).data == bytes.fromhex(
-        '01FF000000000000'
-    )
-    assert pack_homing(0, board_id=2).data == bytes.fromhex(
-        '0200000000000000'
-    )
-    assert pack_homing(board_id=3).data == bytes.fromhex(
-        '03FF000000000000'
-    )
-    assert pack_clear_error(0, board_id=2).data == bytes.fromhex(
-        '0200000000000000'
-    )
+    assert pack_clear_error().data == bytes.fromhex('FF00000000000000')
     assert pack_clear_error(board_id=3).data == bytes.fromhex(
-        '03FF000000000000'
+        'FF00000000000000'
     )
+
+    assert pack_gripper_home().can_id == 0x023
+    assert pack_gripper_home().data == bytes.fromhex('FF00000000000000')
+    assert pack_gripper_home(duration_ticks=100).data == bytes.fromhex(
+        'FF00640000000000'
+    )
+
+    with pytest.raises(ValueError, match='Board3 home'):
+        pack_homing(board_id=3)
+    with pytest.raises(ValueError, match='0xFF'):
+        pack_homing(0, board_id=2)
+    with pytest.raises(ValueError, match='0xFF'):
+        pack_clear_error(0, board_id=2)
 
 
 def test_board_specific_error_names_match_integrated_protocol():

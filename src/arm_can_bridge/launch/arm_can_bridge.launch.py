@@ -5,6 +5,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -17,12 +18,18 @@ def generate_launch_description():
     ])
 
     can_interface = LaunchConfiguration('can_interface')
+    enable_gripper = LaunchConfiguration('enable_gripper')
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'can_interface',
             default_value='vcan0',
             description='SocketCAN interface name, e.g. vcan0 or can0.',
+        ),
+        DeclareLaunchArgument(
+            'enable_gripper',
+            default_value='true',
+            description='Whether to enable Board3 gripper controller.',
         ),
         Node(
             package='arm_can_bridge',
@@ -31,7 +38,13 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 parameter_file,
-                {'can_interface': can_interface},
+                {
+                    'can_interface': can_interface,
+                    'enable_gripper': ParameterValue(
+                        enable_gripper,
+                        value_type=bool,
+                    ),
+                },
             ],
         )
     ])

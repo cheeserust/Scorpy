@@ -11,7 +11,7 @@ from control_msgs.action import FollowJointTrajectory
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
@@ -37,6 +37,7 @@ from .can_protocol import (
     pack_clear_error,
     pack_enable,
     pack_estop,
+    pack_gripper_home,
     pack_homing,
     RECEIVE_CAN_IDS,
     unpack_board3_position_feedback,
@@ -92,6 +93,9 @@ class ArmCanBridgeNode(Node):
             int(self.get_parameter('control_wait_timeout_ms').value)
             / 1000.0
         )
+        self._gripper_enabled = bool(
+            self.get_parameter('enable_gripper').value
+        )
         self._board3_feedback = Board3PositionFeedbackAssembler()
         self._arm_feedback_lock = threading.RLock()
         self._arm_feedback_positions_rad: list[float | None] = []
@@ -123,20 +127,21 @@ class ArmCanBridgeNode(Node):
             max_positions_param='arm_max_positions_rad',
             home_positions_param='arm_home_positions_rad',
         )
-        self._gripper_controller = self._create_controller_context(
-            label='gripper',
-            action_name_param='gripper_action_name',
-            joint_names_param='gripper_joint_names',
-            board_ids_param='gripper_board_ids',
-            motor_ids_param='gripper_motor_ids',
-            min_positions_param='gripper_min_positions_rad',
-            max_positions_param='gripper_max_positions_rad',
-            home_positions_param='gripper_home_positions_rad',
-        )
-        self._controllers = (
-            self._arm_controller,
-            self._gripper_controller,
-        )
+        self._gripper_controller = None
+        controllers = [self._arm_controller]
+        if self._gripper_enabled:
+            self._gripper_controller = self._create_controller_context(
+                label='gripper',
+                action_name_param='gripper_action_name',
+                joint_names_param='gripper_joint_names',
+                board_ids_param='gripper_board_ids',
+                motor_ids_param='gripper_motor_ids',
+                min_positions_param='gripper_min_positions_rad',
+                max_positions_param='gripper_max_positions_rad',
+                home_positions_param='gripper_home_positions_rad',
+            )
+            controllers.append(self._gripper_controller)
+        self._controllers = tuple(controllers)
         self._validate_combined_joint_names()
         self._configure_arm_position_feedback()
         self._transport.open()
@@ -244,8 +249,10 @@ class ArmCanBridgeNode(Node):
         )
         self.get_logger().info(
             'Action servers ready: '
-            f'{self._arm_controller.action_name}, '
-            f'{self._gripper_controller.action_name}'
+            + ', '.join(
+                controller.action_name
+                for controller in self._controllers
+            )
         )
         self.get_logger().info(
             'Services ready: /arm_board/enable, /arm_board/disable, '
@@ -262,6 +269,7 @@ class ArmCanBridgeNode(Node):
         self.declare_parameter('status_publish_period_ms', 500)
         self.declare_parameter('joint_states_topic', '/joint_states')
         self.declare_parameter('joint_state_rate_hz', 50.0)
+        self.declare_parameter('enable_gripper', True)
         self.declare_parameter('arm_speed_raw', 0)
         self.declare_parameter('gripper_target_load_raw', 500)
         # Backward-compatible alias for older config files.
@@ -584,11 +592,15 @@ class ArmCanBridgeNode(Node):
             return
 
         if frame.can_id == CAN_ID_BOARD3_POSITION_FEEDBACK:
+            if not self._gripper_enabled:
+                return
             self._handle_board3_position_feedback(frame)
             return
 
         board_id = BOARD_ID_BY_STATUS_CAN_ID.get(frame.can_id)
         if board_id is None:
+            return
+        if board_id == BOARD_ID_BOARD3 and not self._gripper_enabled:
             return
 
         try:
@@ -693,6 +705,9 @@ class ArmCanBridgeNode(Node):
         self,
         positions_by_motor_rad: Sequence[float],
     ) -> None:
+        if self._gripper_controller is None:
+            return
+
         joint_positions = []
 
         for board_id, motor_id in zip(
@@ -818,7 +833,7 @@ class ArmCanBridgeNode(Node):
         if not self._all_board_states_enabled():
             response.success = False
             response.message = self._format_status(
-                'Cannot home: arm/gripper boards are not enabled'
+                'Cannot home: required boards are not enabled'
             )
             return response
 
@@ -831,6 +846,13 @@ class ArmCanBridgeNode(Node):
             response,
         ):
             return response
+
+        if self._gripper_enabled:
+            if not self._send_or_fail(
+                pack_gripper_home(),
+                response,
+            ):
+                return response
 
         success = self._wait_until(
             lambda: (
@@ -1301,15 +1323,24 @@ class ArmCanBridgeNode(Node):
 def main(args=None) -> None:
     """Run the arm CAN bridge service node."""
     rclpy.init(args=args)
-    node = ArmCanBridgeNode()
+    node: ArmCanBridgeNode | None = None
     executor = MultiThreadedExecutor(num_threads=4)
-    executor.add_node(node)
+    node_added = False
 
     try:
+        node = ArmCanBridgeNode()
+        executor.add_node(node)
+        node_added = True
         executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            if node_added:
+                executor.remove_node(node)
+            node.destroy_node()
+        executor.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

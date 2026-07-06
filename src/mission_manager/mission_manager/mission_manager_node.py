@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+import json
 import os
+import time
 
 from ament_index_python.packages import (
     get_package_share_directory,
@@ -12,6 +15,8 @@ from rclpy.action import (
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import String
 
 from vicpinky_interfaces.action import ExecuteMission
 from vicpinky_interfaces.msg import MissionStatus
@@ -95,11 +100,40 @@ class MissionManager(Node):
         self.status_publisher = self.create_publisher(
             MissionStatus,
             '/mission/status',
+            QoSProfile(
+                depth=10,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
+        )
+        self.event_publisher = self.create_publisher(
+            String,
+            '/mission/event_log',
+            QoSProfile(
+                depth=100,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
+        )
+        self.heartbeat_publisher = self.create_publisher(
+            String,
+            '/robot/heartbeat',
             10,
         )
 
         self.runtime_state = MissionRuntimeState.IDLE
         self.mission_active = False
+        self.current_mission_id = ''
+        self.current_state = MissionRuntimeState.IDLE.value
+        self.current_active_task = ''
+        self.current_progress = 0.0
+        self.current_message = 'Mission manager idle'
+        self.current_error = False
+        self.event_sequence = 0
+
+        self.heartbeat_timer = self.create_timer(
+            1.0,
+            self.publish_heartbeat,
+            callback_group=self.callback_group,
+        )
 
         self.execute_action_server = ActionServer(
             self,
@@ -173,6 +207,69 @@ class MissionManager(Node):
         status.stamp = self.get_clock().now().to_msg()
 
         self.status_publisher.publish(status)
+        self.current_mission_id = mission_id
+        self.current_state = state
+        self.current_active_task = active_task
+        self.current_progress = float(progress)
+        self.current_message = message
+        self.current_error = bool(error)
+
+    def publish_event(
+        self,
+        *,
+        level: str,
+        state: str,
+        active_task: str,
+        progress: float,
+        message: str,
+        mission_id: str = '',
+    ) -> None:
+        """Publish a compact event that late reconnecting GUIs can replay."""
+        self.event_sequence += 1
+        now = time.time()
+        payload = {
+            'seq': self.event_sequence,
+            'time': self._now_iso(now),
+            'stamp': now,
+            'mission_id': mission_id or self.current_mission_id,
+            'level': level,
+            'state': state,
+            'active_task': active_task,
+            'progress': float(progress),
+            'message': message,
+        }
+
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self.event_publisher.publish(msg)
+
+    def publish_heartbeat(self) -> None:
+        """Publish robot-alive state for external GUI connection detection."""
+        now = time.time()
+        payload = {
+            'time': self._now_iso(now),
+            'stamp': now,
+            'alive': True,
+            'mission_active': bool(self.mission_active),
+            'mission_id': self.current_mission_id,
+            'mission_state': self.current_state,
+            'runtime_state': self.runtime_state.value,
+            'active_task': self.current_active_task,
+            'progress': float(self.current_progress),
+            'error': bool(self.current_error),
+            'message': self.current_message,
+        }
+
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self.heartbeat_publisher.publish(msg)
+
+    @staticmethod
+    def _now_iso(timestamp: float) -> str:
+        return datetime.fromtimestamp(
+            timestamp,
+            tz=timezone.utc,
+        ).isoformat(timespec='milliseconds')
 
     @staticmethod
     def publish_action_feedback(
@@ -214,6 +311,14 @@ class MissionManager(Node):
             error=True,
             message=message,
         )
+        self.publish_event(
+            level='warning',
+            state=MissionRuntimeState.CANCELED.value,
+            active_task='',
+            progress=progress,
+            message=message,
+            mission_id=context.mission_id,
+        )
 
         return result
 
@@ -250,6 +355,14 @@ class MissionManager(Node):
                     error=True,
                     message=result.message,
                 )
+                self.publish_event(
+                    level='error',
+                    state='CONFIG_ERROR',
+                    active_task='',
+                    progress=0.0,
+                    message=result.message,
+                    mission_id=context.mission_id,
+                )
 
                 self.get_logger().error(result.message)
                 return result
@@ -263,6 +376,14 @@ class MissionManager(Node):
                 progress=0.0,
                 error=False,
                 message='Mission started',
+            )
+            self.publish_event(
+                level='info',
+                state=MissionRuntimeState.RUNNING.value,
+                active_task='',
+                progress=0.0,
+                message='Mission started',
+                mission_id=context.mission_id,
             )
 
             self.publish_action_feedback(
@@ -309,6 +430,14 @@ class MissionManager(Node):
                         progress=base_progress,
                         error=False,
                         message=attempt_message,
+                    )
+                    self.publish_event(
+                        level='info',
+                        state=step.state,
+                        active_task=step.server,
+                        progress=base_progress,
+                        message=attempt_message,
+                        mission_id=context.mission_id,
                     )
 
                     self.publish_action_feedback(
@@ -379,12 +508,28 @@ class MissionManager(Node):
                             f'Step succeeded: {step.state}, '
                             f'message="{last_result.message}"'
                         )
+                        self.publish_event(
+                            level='success',
+                            state=step.state,
+                            active_task=step.server,
+                            progress=(step_index + 1) / total_steps,
+                            message=last_result.message,
+                            mission_id=context.mission_id,
+                        )
                         break
 
                     self.get_logger().warning(
                         f'Step failed: {step.state}, '
                         f'attempt={attempt}/{max_attempts}, '
                         f'message="{last_result.message}"'
+                    )
+                    self.publish_event(
+                        level='warning',
+                        state=step.state,
+                        active_task=step.server,
+                        progress=base_progress,
+                        message=last_result.message,
+                        mission_id=context.mission_id,
                     )
 
                 if not step_succeeded:
@@ -406,6 +551,14 @@ class MissionManager(Node):
                         error=True,
                         message=result.message,
                     )
+                    self.publish_event(
+                        level='error',
+                        state=step.state,
+                        active_task=step.server,
+                        progress=step_index / total_steps,
+                        message=result.message,
+                        mission_id=context.mission_id,
+                    )
 
                     return result
 
@@ -423,6 +576,14 @@ class MissionManager(Node):
                 progress=1.0,
                 error=False,
                 message=result.message,
+            )
+            self.publish_event(
+                level='success',
+                state=MissionRuntimeState.DONE.value,
+                active_task='',
+                progress=1.0,
+                message=result.message,
+                mission_id=context.mission_id,
             )
 
             self.publish_action_feedback(
@@ -455,6 +616,14 @@ class MissionManager(Node):
                 progress=0.0,
                 error=True,
                 message=result.message,
+            )
+            self.publish_event(
+                level='error',
+                state=MissionRuntimeState.FAILED.value,
+                active_task='',
+                progress=0.0,
+                message=result.message,
+                mission_id=context.mission_id,
             )
 
             return result

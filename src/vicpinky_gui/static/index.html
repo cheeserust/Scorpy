@@ -20,10 +20,35 @@
     </header>
 
     <main class="dashboard">
+      <section class="panel overview-panel">
+        <div class="overview-grid">
+          <article id="overviewConnectionCard" class="overview-card neutral">
+            <div class="overview-label">Robot Link</div>
+            <div id="overviewConnectionState" class="overview-value">Waiting</div>
+            <div id="overviewConnectionMeta" class="overview-meta">No heartbeat</div>
+          </article>
+          <article id="overviewMissionCard" class="overview-card neutral">
+            <div class="overview-label">Mission</div>
+            <div id="overviewMissionState" class="overview-value">Idle</div>
+            <div id="overviewMissionMeta" class="overview-meta">Progress 0%</div>
+          </article>
+          <article id="overviewTaskCard" class="overview-card neutral">
+            <div class="overview-label">Active Task</div>
+            <div id="overviewActiveTask" class="overview-value">-</div>
+            <div id="overviewTaskMeta" class="overview-meta">No active task</div>
+          </article>
+          <article id="overviewRecoveryCard" class="overview-card neutral">
+            <div class="overview-label">Recovery</div>
+            <div id="overviewRecoveryState" class="overview-value">No Gap</div>
+            <div id="overviewRecoveryMeta" class="overview-meta">No disconnect window</div>
+          </article>
+        </div>
+      </section>
+
       <section class="panel mission-panel">
         <div class="panel-heading">
           <div>
-            <h2>Mission</h2>
+            <h2>Mission Command</h2>
             <div id="missionState" class="meta-line">No status</div>
           </div>
           <div id="missionReady" class="status-chip neutral">Action</div>
@@ -94,6 +119,48 @@
         </dl>
       </section>
 
+      <section class="panel link-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Robot Link</h2>
+            <div id="robotLinkDetail" class="meta-line">Waiting for heartbeat</div>
+          </div>
+          <div id="robotLinkState" class="status-chip neutral">Waiting</div>
+        </div>
+
+        <dl class="status-list compact-status">
+          <div>
+            <dt>Last Seen</dt>
+            <dd id="robotLastSeen">-</dd>
+          </div>
+          <div>
+            <dt>Heartbeat</dt>
+            <dd id="robotHeartbeatAge">-</dd>
+          </div>
+          <div>
+            <dt>Last State</dt>
+            <dd id="robotLastMissionState">-</dd>
+          </div>
+          <div>
+            <dt>Last Task</dt>
+            <dd id="robotLastTask">-</dd>
+          </div>
+          <div>
+            <dt>Progress</dt>
+            <dd id="robotLastProgress">-</dd>
+          </div>
+          <div>
+            <dt>Gap</dt>
+            <dd id="robotDisconnectedDuration">-</dd>
+          </div>
+        </dl>
+
+        <div class="disconnect-summary">
+          <h3>Events During Last Disconnect</h3>
+          <ul id="disconnectEvents" class="mini-event-list"></ul>
+        </div>
+      </section>
+
       <section class="panel arm-panel">
         <div class="panel-heading">
           <div>
@@ -114,6 +181,66 @@
         </div>
 
         <div id="boardGrid" class="board-grid"></div>
+      </section>
+
+      <section class="panel manual-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Manual Servo Control</h2>
+            <div id="manualStatus" class="meta-line">No manual command</div>
+          </div>
+          <div id="manualReady" class="status-chip neutral">Waiting</div>
+        </div>
+
+        <div class="manual-layout">
+          <div class="manual-section">
+            <div class="manual-section-heading">
+              <div>
+                <h3>Arm</h3>
+                <span id="manualArmMeta">Action status unknown</span>
+              </div>
+              <button id="useCurrentArmButton" class="secondary-button" type="button">
+                Use Current
+              </button>
+            </div>
+            <div id="armManualControls" class="manual-control-grid"></div>
+            <div class="manual-actions">
+              <label>
+                Duration
+                <input id="manualArmDuration" type="number" min="0.1" max="30" step="0.1" value="2.0">
+              </label>
+              <button id="sendArmManualButton" class="primary-button" type="button">
+                Send Arm
+              </button>
+            </div>
+          </div>
+
+          <div class="manual-section">
+            <div class="manual-section-heading">
+              <div>
+                <h3>Gripper</h3>
+                <span id="manualGripperMeta">Action status unknown</span>
+              </div>
+              <button id="useCurrentGripperButton" class="secondary-button" type="button">
+                Use Current
+              </button>
+            </div>
+            <div id="gripperManualControls" class="manual-control-grid gripper-grid"></div>
+            <div class="manual-actions gripper-actions">
+              <label>
+                Duration
+                <input id="manualGripperDuration" type="number" min="0.1" max="30" step="0.1" value="1.0">
+              </label>
+              <label>
+                Load
+                <input id="manualGripperLoad" type="number" min="0" max="1023" step="1" value="500">
+              </label>
+              <button id="sendGripperManualButton" class="primary-button" type="button">
+                Send Gripper
+              </button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="panel joint-panel">
@@ -162,6 +289,10 @@
           <div>
             <h3>Control</h3>
             <ul id="eventLog" class="log-list"></ul>
+          </div>
+          <div>
+            <h3>Mission Events</h3>
+            <ul id="missionEventLog" class="log-list"></ul>
           </div>
           <div>
             <h3>Board Status</h3>

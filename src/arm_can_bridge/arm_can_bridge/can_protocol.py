@@ -11,6 +11,7 @@ import struct
 CAN_ID_ESTOP = 0x001
 CAN_ID_ENABLE = 0x010
 CAN_ID_HOMING = 0x020
+CAN_ID_BOARD3_GRIPPER_HOME = 0x023
 CAN_ID_CLEAR_ERROR = 0x030
 
 CAN_ID_BOARD1_POSITION_COMMAND = 0x101
@@ -560,11 +561,14 @@ def pack_enable(
     enabled: bool,
     board_id: int = BOARD_ID_ALL,
 ) -> CanFrame:
-    """Pack the common motor/servo enable or disable command."""
-    normalized_board_id = validate_board_id(board_id, allow_all=True)
+    """Pack the broadcast motor/servo enable or disable command."""
+    # Final integrated protocol uses CAN ID only for targeting common control
+    # commands. The optional board_id argument is retained for compatibility
+    # with older callers but is not encoded.
+    validate_board_id(board_id, allow_all=True)
     return CanFrame(
         CAN_ID_ENABLE,
-        _reserved_payload(1 if enabled else 0, normalized_board_id),
+        _reserved_payload(1 if enabled else 0),
     )
 
 
@@ -574,26 +578,40 @@ def pack_homing(
     *,
     board_id: int = BOARD_ID_ALL,
 ) -> CanFrame:
-    """Pack a homing command for Board1, Board2, Board3, or broadcast."""
+    """Pack the Board1+Board2 stepper homing broadcast command."""
+    # Final protocol: 0x020 is a stepper homing broadcast for Board1/2 only.
+    # Board3 gripper home posture uses CAN ID 0x023.
     normalized_board_id = validate_board_id(board_id, allow_all=True)
 
     if mode != 0:
         raise ValueError('Only homing mode 0 is supported')
+    if normalized_board_id == BOARD_ID_BOARD3:
+        raise ValueError('Board3 home posture uses pack_gripper_home')
     if motor_id != ALL_MOTORS:
-        if normalized_board_id in (BOARD_ID_ALL_LEGACY, BOARD_ID_ALL):
-            raise ValueError(
-                'Broadcast homing must target all local motors'
-            )
-        if normalized_board_id == BOARD_ID_BOARD3:
-            raise ValueError('Board3 homing supports only all gripper motors')
-        else:
-            valid_motor_count = motor_count_for_board(normalized_board_id)
-            if not 0 <= int(motor_id) < valid_motor_count:
-                raise ValueError('Homing motor_id is invalid for board')
+        raise ValueError('Stepper homing broadcast uses motor_id 0xFF')
 
     return CanFrame(
         CAN_ID_HOMING,
-        _reserved_payload(normalized_board_id, int(motor_id), int(mode)),
+        _reserved_payload(int(motor_id), int(mode)),
+    )
+
+
+def pack_gripper_home(
+    motor_id: int = ALL_MOTORS,
+    mode: int = 0,
+    duration_ticks: int = 0,
+) -> CanFrame:
+    """Pack the Board3 gripper home posture command."""
+    if motor_id != ALL_MOTORS:
+        raise ValueError('Gripper home posture uses motor_id 0xFF')
+    if mode != 0:
+        raise ValueError('Only gripper home mode 0 is supported')
+    if not 0 <= int(duration_ticks) <= MAX_DURATION_TICKS:
+        raise ValueError('duration_ticks must fit uint8')
+
+    return CanFrame(
+        CAN_ID_BOARD3_GRIPPER_HOME,
+        _reserved_payload(int(motor_id), int(mode), int(duration_ticks)),
     )
 
 
@@ -602,26 +620,17 @@ def pack_clear_error(
     *,
     board_id: int = BOARD_ID_ALL,
 ) -> CanFrame:
-    """Pack a clear-error command with a target board id."""
-    normalized_board_id = validate_board_id(board_id, allow_all=True)
+    """Pack the broadcast clear-error command."""
+    # Final integrated protocol uses Byte0=0xFF for all-board error clear.
+    # board_id is retained for older call sites but is not encoded.
+    validate_board_id(board_id, allow_all=True)
 
     if motor_id != ALL_MOTORS:
-        if normalized_board_id in (BOARD_ID_ALL_LEGACY, BOARD_ID_ALL):
-            raise ValueError(
-                'Broadcast clear-error must target all local motors'
-            )
-        if normalized_board_id == BOARD_ID_BOARD3:
-            raise ValueError(
-                'Board3 clear-error supports only all gripper motors'
-            )
-        else:
-            valid_motor_count = motor_count_for_board(normalized_board_id)
-            if not 0 <= int(motor_id) < valid_motor_count:
-                raise ValueError('Clear-error motor_id is invalid for board')
+        raise ValueError('Clear-error broadcast uses motor_id 0xFF')
 
     return CanFrame(
         CAN_ID_CLEAR_ERROR,
-        _reserved_payload(normalized_board_id, int(motor_id)),
+        _reserved_payload(int(motor_id)),
     )
 
 
@@ -730,7 +739,7 @@ def unpack_board3_position_feedback(
         positions_raw=raw_positions,
         positions_rad=positions_rad,
         status_codes=status_codes,
-        valid=bool(raw_flags & 0x40),
+        valid=raw_flags == 0x00 or bool(raw_flags & 0x40),
         fault=bool(raw_flags & 0x80),
         raw_flags=raw_flags,
     )
