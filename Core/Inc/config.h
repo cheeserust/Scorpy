@@ -7,9 +7,9 @@
 #define SYSCLK_HZ                (96 * 1000 * 1000) // 96 MHz
 
 #ifndef BOARD_ID
-#define BOARD_ID                 1
+#define BOARD_ID                 2
 #endif
-#define ENABLE_UART 1
+#define ENABLE_UART 0
 
 #if BOARD_ID == 1
 #define AXIS_COUNT               4
@@ -91,7 +91,6 @@ extern volatile uint32_t global_tick_ms;
 
 uint8_t system_homing_done_bits(void);
 uint8_t system_enabled_status(void);
-uint8_t system_first_moving_axis(void);
 uint8_t system_all_homed(void);
 
 #endif

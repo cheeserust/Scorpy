@@ -1,8 +1,8 @@
-# Server Team Note: Board1 CAN Feedback Compact Format
+# Server Team Note: Board1/Board2 CAN Feedback Compact Format
 
 Date: 2026-07-05
 
-This document describes only the changed Board1 feedback frames. Command frames are unchanged.
+This document describes the changed Board1 and Board2 feedback frames. Command frames are unchanged.
 
 ## Summary
 
@@ -13,20 +13,27 @@ old: 0x201 status x 1 + 0x301 per-axis position x 4 = 5 frames / cycle
 new: 0x201 compact status x 1 + 0x301 compact position x 1 = 2 frames / cycle
 ```
 
-There is no new `0x401` frame. Axis state/flags moved into `0x201`.
+Board2 keeps the same number of periodic feedback frames, but now uses the same compact layout:
 
-This is a breaking wire-format change for Board1:
+```text
+old: 0x202 status x 1 + 0x302 per-axis position x 1 = 2 frames / cycle
+new: 0x202 compact status x 1 + 0x302 compact position x 1 = 2 frames / cycle
+```
 
-- `0x201 byte2` is no longer plain homing bits for Board1.
-- `0x201 byte3` is no longer moving motor id for Board1.
+There is no new `0x401` frame. Axis state/flags moved into `0x201` / `0x202`.
+
+This is a breaking wire-format change for Board1 and Board2:
+
+- `0x201/0x202 byte2` is no longer plain homing bits.
+- `0x201/0x202 byte3` is no longer moving motor id.
 - `0x301` is no longer one axis per frame.
-- `0x301` no longer contains `motor_id`, `flags`, `error`, or `sequence`.
+- `0x301/0x302` no longer contains `motor_id`, `flags`, `error`, or `sequence`.
 
-Board2/Board3 remain on their existing per-axis position format unless separately changed.
+Board3 remains on its existing per-axis position format unless separately changed.
 
-## Changed Frame: `0x201` Board1 Compact Status
+## Changed Frame: `0x201` / `0x202` Compact Status
 
-Board1 status CAN ID remains `0x201`, DLC remains `8`.
+Board1 status CAN ID remains `0x201`, Board2 status CAN ID remains `0x202`, DLC remains `8`.
 
 ```text
 byte0: board state
@@ -37,6 +44,15 @@ byte4: limit status bits
 byte5: queue free count
 byte6: enabled
 byte7: status sequence counter
+```
+
+Board2 has only axis0. For Board2:
+
+```text
+byte2 low nibble: axis0 flags
+byte2 high nibble: 0
+byte3: 0
+byte4 bit0: axis0 limit active
 ```
 
 Axis flags are 4-bit values:
@@ -76,7 +92,7 @@ byte4 bit2: axis2 limit active
 byte4 bit3: axis3 limit active
 ```
 
-### `0x201` Example
+### `0x201` Board1 Example
 
 Example payload:
 
@@ -106,11 +122,35 @@ byte6 = 0x01 -> enabled
 byte7 = 0x34 -> status sequence
 ```
 
-## Changed Frame: `0x301` Board1 Compact Position
+### `0x202` Board2 Example
 
-Board1 position CAN ID remains `0x301`, DLC remains `8`.
+Example payload:
 
-The payload now contains all four Board1 axis positions in one frame.
+```text
+CAN ID: 0x202
+DLC:    8
+DATA:   01 00 0B 00 00 20 01 35
+```
+
+Decode:
+
+```text
+byte0 = 0x01 -> STATE_IDLE
+byte1 = 0x00 -> ERR_NONE
+byte2 low nibble = 0xB -> axis0 homed + ready + target reached
+byte2 high nibble = 0x0 -> reserved
+byte3 = 0x00 -> reserved
+byte4 = 0x00 -> axis0 limit not active
+byte5 = 0x20 -> queue free count = 32
+byte6 = 0x01 -> enabled
+byte7 = 0x35 -> status sequence
+```
+
+## Changed Frame: `0x301` / `0x302` Compact Position
+
+Board1 position CAN ID remains `0x301`, Board2 position CAN ID remains `0x302`, DLC remains `8`.
+
+The payload contains up to four axis positions in one frame.
 
 ```text
 byte0~1: axis0 current position, int16 little endian, unit 0.01 degree
@@ -118,6 +158,8 @@ byte2~3: axis1 current position, int16 little endian, unit 0.01 degree
 byte4~5: axis2 current position, int16 little endian, unit 0.01 degree
 byte6~7: axis3 current position, int16 little endian, unit 0.01 degree
 ```
+
+Board2 has only axis0. For Board2, bytes `0~1` contain base axis position and bytes `2~7` are reserved `0`.
 
 Position unit is unchanged:
 
@@ -133,9 +175,9 @@ minimum: -32768 -> -327.68 deg
 maximum:  32767 ->  327.67 deg
 ```
 
-Board1 configured joint limits currently fit inside this range, including axis3 `-170.00..170.00 deg`.
+Board1 and Board2 configured joint limits currently fit inside this range, including Board1 axis3 `-170.00..170.00 deg` and Board2 base `-90.00..180.00 deg`.
 
-### `0x301` Example
+### `0x301` Board1 Example
 
 Example positions:
 
@@ -169,11 +211,35 @@ Negative limit example:
 axis3 = -170.00 deg -> -17000 -> 0xBD98 -> 98 BD
 ```
 
+### `0x302` Board2 Example
+
+Example position:
+
+```text
+axis0 = 30.00 deg -> 3000 -> 0x0BB8 -> B8 0B
+axis1~3 reserved -> 00 00 00 00 00 00
+```
+
+Resulting payload:
+
+```text
+CAN ID: 0x302
+DLC:    8
+DATA:   B8 0B 00 00 00 00 00 00
+```
+
+Decode:
+
+```text
+axis0 = int16_le(B8 0B) = 3000 -> 30.00 deg
+ignore/reserved: bytes 2~7
+```
+
 ## Server Parser Changes
 
-### Remove old `0x301` assumptions
+### Remove old `0x301` / `0x302` assumptions
 
-Do not parse Board1 `0x301` like this anymore:
+Do not parse Board1 `0x301` or Board2 `0x302` like this anymore:
 
 ```text
 byte0: motor_id
@@ -183,7 +249,7 @@ byte6: error
 byte7: sequence
 ```
 
-The server should no longer wait for four `0x301` frames to update all Board1 joints. One `0x301` frame updates all four Board1 axes.
+The server should no longer wait for four `0x301` frames to update all Board1 joints. One `0x301` frame updates all four Board1 axes. One `0x302` frame updates Board2 axis0, with slots 1~3 reserved.
 
 ### Python-style parsing example
 
@@ -194,10 +260,10 @@ def read_i16_le(data, offset):
         value -= 0x10000
     return value
 
-def parse_board1_status_0x201(data):
+def parse_compact_status(data, axis_count):
     state = data[0]
     error = data[1]
-    flags = [
+    all_flags = [
         data[2] & 0x0F,
         (data[2] >> 4) & 0x0F,
         data[3] & 0x0F,
@@ -209,7 +275,7 @@ def parse_board1_status_0x201(data):
     sequence = data[7]
 
     axis = []
-    for i, f in enumerate(flags):
+    for i, f in enumerate(all_flags[:axis_count]):
         axis.append({
             "homed": bool(f & 0x01),
             "ready": bool(f & 0x02),
@@ -227,15 +293,20 @@ def parse_board1_status_0x201(data):
         "sequence": sequence,
     }
 
-def parse_board1_position_0x301(data):
-    raw_positions = [
+def parse_compact_position(data, axis_count):
+    all_raw_positions = [
         read_i16_le(data, 0),
         read_i16_le(data, 2),
         read_i16_le(data, 4),
         read_i16_le(data, 6),
     ]
+    raw_positions = all_raw_positions[:axis_count]
     positions_deg = [p / 100.0 for p in raw_positions]
     return raw_positions, positions_deg
+
+# CAN ID mapping:
+# 0x201 status, 0x301 position -> Board1, axis_count = 4
+# 0x202 status, 0x302 position -> Board2, axis_count = 1
 ```
 
 ### C/C++-style parsing example
@@ -247,7 +318,7 @@ static int16_t read_i16_le(const uint8_t *p)
     return (int16_t)v;
 }
 
-void parse_board1_status_0x201(const uint8_t data[8])
+void parse_compact_status(const uint8_t data[8], uint8_t axis_count)
 {
     uint8_t state = data[0];
     uint8_t error = data[1];
@@ -262,7 +333,9 @@ void parse_board1_status_0x201(const uint8_t data[8])
     axis_flags[2] = data[3] & 0x0F;
     axis_flags[3] = (data[3] >> 4) & 0x0F;
 
-    for (int axis = 0; axis < 4; axis++) {
+    if (axis_count > 4) axis_count = 4;
+
+    for (uint8_t axis = 0; axis < axis_count; axis++) {
         uint8_t flags = axis_flags[axis];
         bool homed = (flags & 0x01) != 0;
         bool ready = (flags & 0x02) != 0;
@@ -283,23 +356,26 @@ void parse_board1_status_0x201(const uint8_t data[8])
     (void)sequence;
 }
 
-void parse_board1_position_0x301(const uint8_t data[8], int16_t pos_001deg[4])
+void parse_compact_position(const uint8_t data[8],
+                            uint8_t axis_count,
+                            int16_t pos_001deg[4])
 {
-    pos_001deg[0] = read_i16_le(&data[0]);
-    pos_001deg[1] = read_i16_le(&data[2]);
-    pos_001deg[2] = read_i16_le(&data[4]);
-    pos_001deg[3] = read_i16_le(&data[6]);
+    if (axis_count > 4) axis_count = 4;
+
+    for (uint8_t axis = 0; axis < axis_count; axis++) {
+        pos_001deg[axis] = read_i16_le(&data[axis * 2]);
+    }
 }
 ```
 
 ## Integration Notes
 
 - Do not rely on receiving four Board1 `0x301` frames per cycle anymore.
-- Do not rely on `0x301` frame order for axis mapping. Axis mapping is fixed by byte position.
-- Do not rely on `0x301` sequence counter anymore. Board1 status sequence is now `0x201 byte7`.
-- Do not depend on status/position frame order. Use latest received `0x201` for status and latest received `0x301` for positions.
-- If the server supports Board2/Board3, keep their existing parsers unless those boards are explicitly migrated later.
-- Existing Board1 command frames are unchanged.
+- Do not rely on `0x301` / `0x302` frame order for axis mapping. Axis mapping is fixed by byte position.
+- Do not rely on `0x301` / `0x302` sequence counter anymore. Compact status sequence is now status `byte7`.
+- Do not depend on status/position frame order. Use the latest received status frame and latest received position frame for each board.
+- Board1 uses `axis_count=4`; Board2 uses `axis_count=1`; ignore position slots `>= axis_count`.
+- Existing Board1/Board2 command frames are unchanged.
 
 ## Quick Acceptance Checks
 
@@ -308,15 +384,19 @@ When firmware is updated, the server-side CAN log should show approximately:
 ```text
 0x201 one frame per 100ms cycle
 0x301 one frame per 100ms cycle
+0x202 one frame per 100ms cycle
+0x302 one frame per 100ms cycle
 ```
 
-It should not show four Board1 `0x301` frames per cycle anymore.
+It should not show four Board1 `0x301` frames per cycle anymore. Board2 should still show one `0x302` frame per cycle, but now in compact slot format.
 
 Use these payloads as parser smoke tests:
 
 ```text
 0x201 DATA 03 00 7B 7B 00 12 01 34
 0x301 DATA B8 0B F2 F9 00 00 68 42
+0x202 DATA 01 00 0B 00 00 20 01 35
+0x302 DATA B8 0B 00 00 00 00 00 00
 ```
 
 Expected decoded values:
@@ -339,4 +419,17 @@ Expected decoded values:
   axis1 = -1550 -> -15.50 deg
   axis2 = 0     ->   0.00 deg
   axis3 = 17000 -> 170.00 deg
+
+0x202:
+  state = 1
+  error = 0
+  axis0 flags = 0xB
+  limit_bits = 0
+  queue_free = 32
+  enabled = 1
+  sequence = 53
+
+0x302:
+  axis0 = 3000 -> 30.00 deg
+  axis1~3 slots ignored
 ```

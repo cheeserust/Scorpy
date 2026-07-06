@@ -339,7 +339,7 @@ Disable 수신 시 STM32는 queue clear, step 정지, motor disable을 수행합
 - Enable 상태가 아니거나 ESTOP 상태이면 `ERR_INVALID_CMD`로 처리합니다.
 - mode가 `0`이 아니면 `ERR_INVALID_CMD`로 처리합니다.
 
-Homing 완료 시 Board1은 local motor 0~3의 `homing_done`을 1로 설정하고 status의 축별 axis flags bit0(Position Valid / Homed)으로 보고합니다.
+Homing 완료 시 Board1/Board2는 각 local motor의 `homing_done`을 1로 설정하고 status의 축별 axis flags bit0(Position Valid / Homed)으로 보고합니다.
 
 ### Clear Error Broadcast, CAN ID `0x030`
 
@@ -363,14 +363,14 @@ STM32는 100ms마다 status를 송신하고, ESTOP/Enable/Homing/Clear Error/Que
 |---:|---|---|
 | 0 | State | 현재 보드 상태 |
 | 1 | Error Code | 현재 error code |
-| 2 | Board1 Axis Flags 0/1 | Board1: low nibble = axis0 flags, high nibble = axis1 flags. Board2: bit0 = axis0 homing done, Board3: servo ready bits 또는 reserved |
-| 3 | Board1 Axis Flags 2/3 | Board1: low nibble = axis2 flags, high nibble = axis3 flags. Board2: moving motor id, 없으면 `255` |
+| 2 | Axis Flags 0/1 | Board1/Board2 compact status. low nibble = axis0 flags, high nibble = axis1 flags. Board2는 axis0만 사용하므로 high nibble은 `0` |
+| 3 | Axis Flags 2/3 | Board1/Board2 compact status. low nibble = axis2 flags, high nibble = axis3 flags. Board2는 `0` |
 | 4 | Limit Status Bits | Board1: bit0~3 = axis0~3 limit active, Board2: bit0 = axis0 limit active, Board3: servo fault bits 또는 reserved |
 | 5 | Queue Free | trajectory queue 남은 슬롯 수 |
 | 6 | Enabled | 공통 motor enable 상태. `0`: disabled, `1`: enabled |
-| 7 | Status Sequence | Board1: 송신 순서 counter. Board2/3: reserved `0` |
+| 7 | Status Sequence | Board1/Board2 compact status 송신 순서 counter. Board3: reserved `0` |
 
-Board1 axis flags는 축당 4bit입니다.
+Board1/Board2 axis flags는 축당 4bit입니다.
 
 | Bit | 이름 | 의미 |
 |---:|---|---|
@@ -407,15 +407,15 @@ Board1 axis flags는 축당 4bit입니다.
 
 MoveIt2 `/joint_states`의 actual position 입력을 위해 별도 current position feedback frame을 송신합니다.
 
-Board1 펌웨어는 100ms 주기마다 `0x301` compact position frame 1개를 송신합니다.
+Board1/Board2 펌웨어는 100ms 주기마다 compact position frame 1개를 송신합니다.
 
 | Board ID | Position Feedback CAN ID | 송신 frame |
 |---:|---:|---|
 | `1` | `0x301` | Board1 local motor `0~3` compact, 1 frame |
-| `2` | `0x302` | Board2 local motor `0`, 1 frame |
+| `2` | `0x302` | Board2 local motor `0` compact, 1 frame |
 | `3` | `0x303` | Board3 local motor `0~8`, 9 frames |
 
-아래 payload 표는 Board1 `0x301` compact format입니다. Board2/Board3는 별도 compact format을 구현하기 전까지 기존 per-axis position feedback format을 유지합니다.
+아래 payload 표는 Board1 `0x301` / Board2 `0x302` compact format입니다. Board2는 axis0 슬롯만 유효하고 byte2~7은 `0`으로 예약합니다. Board3는 별도 구현 전까지 기존 per-axis position feedback format을 유지합니다.
 
 DLC는 8입니다.
 
@@ -437,7 +437,7 @@ DLC는 8입니다.
 -15.50 deg -> -1550
 ```
 
-Board1 STM32 내부 변환은 현재 step position을 출력축 각도로 역변환합니다.
+Board1/Board2 STM32 내부 변환은 현재 step position을 출력축 각도로 역변환합니다.
 
 ```c
 current_pos_001deg = current_step * 36000 / (gear_ratio[motor_id] * motor_steps_per_rev[motor_id] * 16);
@@ -451,6 +451,15 @@ axis0 = 3000  = B8 0B
 axis1 = -1550 = F2 F9
 axis2 = 0     = 00 00
 axis3 = 17000 = 68 42
+```
+
+Board2 예시:
+
+```text
+CAN ID = 0x302
+axis0 = 3000 = B8 0B
+axis1~3 reserved = 00 00 00 00 00 00
+payload = B8 0B 00 00 00 00 00 00
 ```
 
 ## 11. Queue and Error Policy

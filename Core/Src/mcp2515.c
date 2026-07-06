@@ -75,7 +75,6 @@ volatile uint8_t g_mcp2515_irq_pending = 0;
 #define MCP_SEND_FAIL_RECOVER_THRESHOLD 10
 
 static volatile uint8_t g_mcp2515_spi_fault;
-static uint8_t g_mcp2515_active_osc_mhz = MCP2515_OSC_8MHZ;
 static uint8_t g_mcp2515_send_fail_count;
 
 static uint8_t mcp2515_recover(void);
@@ -210,19 +209,12 @@ static int mcp_set_mode(uint8_t mode)
     return -1;
 }
 
-static void mcp_set_500k_bitrate(int osc_mhz)
+static void mcp_set_500k_bitrate(void)
 {
-    if (osc_mhz == MCP2515_OSC_8MHZ) {
-        /* Fosc = 8 MHz, 500 kbps */
-        mcp_write_reg(MCP_CNF1, 0x00);
-        mcp_write_reg(MCP_CNF2, 0x98);
-        mcp_write_reg(MCP_CNF3, 0x01);
-    } else {
-        /* Fosc = 16 MHz, 500 kbps */
-        mcp_write_reg(MCP_CNF1, 0x00);
-        mcp_write_reg(MCP_CNF2, 0xAC);
-        mcp_write_reg(MCP_CNF3, 0x03);
-    }
+    /* Fosc = 8 MHz, CAN bitrate = 500 kbps */
+    mcp_write_reg(MCP_CNF1, 0x00);
+    mcp_write_reg(MCP_CNF2, 0x98);
+    mcp_write_reg(MCP_CNF3, 0x01);
 }
 
 static void mcp_exti_init(void)
@@ -257,7 +249,7 @@ static void mcp_exti_init(void)
     NVIC_EnableIRQ(MCP_INT_IRQn);
 }
 
-uint8_t mcp2515_init_500k(uint8_t osc_mhz)
+uint8_t mcp2515_init_500k(void)
 {
     g_mcp2515_irq_pending = 0;
     g_mcp2515_spi_fault = 0;
@@ -268,7 +260,7 @@ uint8_t mcp2515_init_500k(uint8_t osc_mhz)
         return 0;
     }
 
-    mcp_set_500k_bitrate(osc_mhz);
+    mcp_set_500k_bitrate();
 
     /* Accept all standard IDs during bring-up. Filtering is done in firmware. */
     mcp_write_reg(MCP_RXB0CTRL, 0x64);   /* RXM=11, BUKT=1 */
@@ -284,23 +276,16 @@ uint8_t mcp2515_init_500k(uint8_t osc_mhz)
         return 0;
     }
 
-    g_mcp2515_active_osc_mhz = osc_mhz;
     g_mcp2515_send_fail_count = 0;
     return 1;
 }
 
 static uint8_t mcp2515_recover(void)
 {
-    uint8_t preferred = g_mcp2515_active_osc_mhz;
-
     g_mcp2515_send_fail_count = 0;
     g_mcp2515_spi_fault = 0;
 
-    if (mcp2515_init_500k(preferred)) return 1;
-    if (preferred != MCP2515_OSC_8MHZ && mcp2515_init_500k(MCP2515_OSC_8MHZ)) return 1;
-    if (preferred != MCP2515_OSC_16MHZ && mcp2515_init_500k(MCP2515_OSC_16MHZ)) return 1;
-
-    return 0;
+    return mcp2515_init_500k();
 }
 
 uint8_t mcp2515_service(void)

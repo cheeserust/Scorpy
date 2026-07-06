@@ -4,9 +4,7 @@
 #include "../Inc/trajectory.h"
 
 static volatile uint8_t g_status_event;
-#if BOARD_ID == 1
 static uint8_t g_status_sequence_counter;
-#endif
 
 static int32_t read_i32_le(const uint8_t *p)
 {
@@ -22,18 +20,6 @@ static uint16_t read_u16_le(const uint8_t *p)
     return (uint16_t)(((uint16_t)p[0]) | ((uint16_t)p[1] << 8));
 }
 
-#if BOARD_ID != 1
-static void write_i32_le(uint8_t *p, int32_t value)
-{
-    uint32_t v = (uint32_t)value;
-    p[0] = (uint8_t)(v & 0xFF);
-    p[1] = (uint8_t)((v >> 8) & 0xFF);
-    p[2] = (uint8_t)((v >> 16) & 0xFF);
-    p[3] = (uint8_t)((v >> 24) & 0xFF);
-}
-#endif
-
-#if BOARD_ID == 1
 static void write_i16_le(uint8_t *p, int16_t value)
 {
     uint16_t v = (uint16_t)value;
@@ -47,7 +33,6 @@ static int16_t clamp_i16(int32_t value)
     if (value < -32768) return -32768;
     return (int16_t)value;
 }
-#endif
 
 static uint8_t make_position_flags(uint8_t motor_id,
                                    uint8_t state_snapshot,
@@ -265,63 +250,50 @@ void board_can_handle_frame(const CanFrame *frame)
 void board_can_send_status(void)
 {
     CanFrame frame;
+    int32_t current_snapshot[AXIS_COUNT];
+    int32_t target_snapshot[AXIS_COUNT];
+    uint8_t state_snapshot;
+    uint8_t error_snapshot;
+    uint8_t enabled_snapshot;
+    uint8_t homing_done_snapshot;
+    uint8_t homing_active_snapshot;
+    uint8_t motion_active_snapshot;
+    uint8_t axis_flags[4] = {0, 0, 0, 0};
 
     frame.id = BOARD_STATUS_CAN_ID;
     frame.dlc = 8;
-    frame.data[0] = g_state;
-    frame.data[1] = g_error_code;
-#if BOARD_ID == 1
-    {
-        int32_t current_snapshot[AXIS_COUNT];
-        int32_t target_snapshot[AXIS_COUNT];
-        uint8_t state_snapshot;
-        uint8_t error_snapshot;
-        uint8_t enabled_snapshot;
-        uint8_t homing_done_snapshot;
-        uint8_t homing_active_snapshot;
-        uint8_t motion_active_snapshot;
-        uint8_t axis_flags[AXIS_COUNT];
 
-        for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-            current_snapshot[i] = g_current_step[i];
-            target_snapshot[i] = g_target_step[i];
-        }
-        state_snapshot = g_state;
-        error_snapshot = g_error_code;
-        enabled_snapshot = g_enabled;
-        homing_done_snapshot = g_homing_done_bits;
-        homing_active_snapshot = g_homing_active;
-        motion_active_snapshot = g_motion_active;
-
-        for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-            axis_flags[i] = make_position_flags(i,
-                                                state_snapshot,
-                                                error_snapshot,
-                                                enabled_snapshot,
-                                                homing_done_snapshot,
-                                                homing_active_snapshot,
-                                                motion_active_snapshot,
-                                                current_snapshot,
-                                                target_snapshot) & 0x0F;
-        }
-
-        frame.data[0] = state_snapshot;
-        frame.data[1] = error_snapshot;
-        frame.data[2] = (uint8_t)(axis_flags[0] | (uint8_t)(axis_flags[1] << 4));
-        frame.data[3] = (uint8_t)(axis_flags[2] | (uint8_t)(axis_flags[3] << 4));
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+        current_snapshot[i] = g_current_step[i];
+        target_snapshot[i] = g_target_step[i];
     }
-#else
-    frame.data[2] = system_homing_done_bits();
-    frame.data[3] = system_first_moving_axis();
-#endif
+    state_snapshot = g_state;
+    error_snapshot = g_error_code;
+    enabled_snapshot = g_enabled;
+    homing_done_snapshot = g_homing_done_bits;
+    homing_active_snapshot = g_homing_active;
+    motion_active_snapshot = g_motion_active;
+
+    for (uint8_t i = 0; i < AXIS_COUNT && i < 4; i++) {
+        axis_flags[i] = make_position_flags(i,
+                                            state_snapshot,
+                                            error_snapshot,
+                                            enabled_snapshot,
+                                            homing_done_snapshot,
+                                            homing_active_snapshot,
+                                            motion_active_snapshot,
+                                            current_snapshot,
+                                            target_snapshot) & 0x0F;
+    }
+
+    frame.data[0] = state_snapshot;
+    frame.data[1] = error_snapshot;
+    frame.data[2] = (uint8_t)(axis_flags[0] | (uint8_t)(axis_flags[1] << 4));
+    frame.data[3] = (uint8_t)(axis_flags[2] | (uint8_t)(axis_flags[3] << 4));
     frame.data[4] = stepper_limit_switch_status_bits();
     frame.data[5] = get_free_axis_command_count();
     frame.data[6] = system_enabled_status();
-#if BOARD_ID == 1
     frame.data[7] = g_status_sequence_counter++;
-#else
-    frame.data[7] = 0;
-#endif
 
     (void)mcp2515_send_frame(&frame);
 }
@@ -360,45 +332,8 @@ static uint8_t make_position_flags(uint8_t motor_id,
     return flags;
 }
 
-#if BOARD_ID != 1
-static void board_can_send_position_feedback(uint8_t motor_id,
-                                             uint8_t state_snapshot,
-                                             uint8_t error_snapshot,
-                                             uint8_t enabled_snapshot,
-                                             uint8_t homing_done_snapshot,
-                                             uint8_t homing_active_snapshot,
-                                             uint8_t motion_active_snapshot,
-                                             const int32_t current_step_snapshot[AXIS_COUNT],
-                                             const int32_t target_step_snapshot[AXIS_COUNT])
-{
-    static uint8_t sequence_counter;
-    CanFrame frame;
-
-    if (motor_id >= AXIS_COUNT) return;
-
-    frame.id = BOARD_POSITION_CAN_ID;
-    frame.dlc = 8;
-    frame.data[0] = motor_id;
-    frame.data[1] = make_position_flags(motor_id,
-                                        state_snapshot,
-                                        error_snapshot,
-                                        enabled_snapshot,
-                                        homing_done_snapshot,
-                                        homing_active_snapshot,
-                                        motion_active_snapshot,
-                                        current_step_snapshot,
-                                        target_step_snapshot);
-    write_i32_le(&frame.data[2], step_to_angle(motor_id, current_step_snapshot[motor_id]));
-    frame.data[6] = error_snapshot;
-    frame.data[7] = sequence_counter++;
-
-    (void)mcp2515_send_frame(&frame);
-}
-#endif
-
 void board_can_send_position_feedback_all(void)
 {
-#if BOARD_ID == 1
     int32_t current_snapshot[AXIS_COUNT];
     CanFrame frame;
 
@@ -408,45 +343,15 @@ void board_can_send_position_feedback_all(void)
 
     frame.id = BOARD_POSITION_CAN_ID;
     frame.dlc = 8;
-    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+    for (uint8_t i = 0; i < 8; i++) {
+        frame.data[i] = 0;
+    }
+    for (uint8_t i = 0; i < AXIS_COUNT && i < 4; i++) {
         write_i16_le(&frame.data[i * 2],
                      clamp_i16(step_to_angle(i, current_snapshot[i])));
     }
 
     (void)mcp2515_send_frame(&frame);
-#else
-    int32_t current_snapshot[AXIS_COUNT];
-    int32_t target_snapshot[AXIS_COUNT];
-    uint8_t state_snapshot;
-    uint8_t error_snapshot;
-    uint8_t enabled_snapshot;
-    uint8_t homing_done_snapshot;
-    uint8_t homing_active_snapshot;
-    uint8_t motion_active_snapshot;
-
-    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        current_snapshot[i] = g_current_step[i];
-        target_snapshot[i] = g_target_step[i];
-    }
-    state_snapshot = g_state;
-    error_snapshot = g_error_code;
-    enabled_snapshot = g_enabled;
-    homing_done_snapshot = g_homing_done_bits;
-    homing_active_snapshot = g_homing_active;
-    motion_active_snapshot = g_motion_active;
-
-    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        board_can_send_position_feedback(i,
-                                         state_snapshot,
-                                         error_snapshot,
-                                         enabled_snapshot,
-                                         homing_done_snapshot,
-                                         homing_active_snapshot,
-                                         motion_active_snapshot,
-                                         current_snapshot,
-                                         target_snapshot);
-    }
-#endif
 }
 
 void board_can_flush_status_event(void)

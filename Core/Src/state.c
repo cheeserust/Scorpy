@@ -26,22 +26,3 @@ uint8_t system_all_homed(void)
 {
     return (system_homing_done_bits() == (uint8_t)((1 << AXIS_COUNT) - 1)) ? 1 : 0;
 }
-
-uint8_t system_first_moving_axis(void)
-{
-    if (g_homing_active) {
-        for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-            if ((g_homing_done_bits & (uint8_t)(1 << i)) == 0) return i;
-        }
-        return 0;
-    }
-
-    if (g_motion_active) {
-        for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-            if (g_current_step[i] != g_target_step[i]) return i;
-        }
-        return 0;
-    }
-
-    return 255;
-}

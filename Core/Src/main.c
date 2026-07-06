@@ -74,10 +74,7 @@ int main(void)
     spi2_init();           // MCP2515 통신용 SPI2 초기화
     tmc5160_init_all();    // 모든 TMC5160 드라이버 설정
 
-    can_ready = mcp2515_init_500k(MCP2515_OSC_8MHZ);
-    if (!can_ready) {
-        can_ready = mcp2515_init_500k(MCP2515_OSC_16MHZ);
-    }
+    can_ready = mcp2515_init_500k();
 
     if (!can_ready) {
         g_error_code = ERR_DRIVER_FAULT;  // CAN 컨트롤러 초기화 실패
