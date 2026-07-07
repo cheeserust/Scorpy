@@ -13,7 +13,7 @@ while True:
     if ids is not None:
         cv2.aruco.drawDetectedMarkers(frame, corners, ids)
         print(ids.flatten())
-        print(f"tz={tvec[2][0]*100:.1f}cm")
+
 
     cv2.imshow("aruco", frame)
     if cv2.waitKey(1) == 27:  # ESC
