@@ -9,6 +9,7 @@ import rclpy
 
 from .board_state import MultiBoardStateTracker
 from .can_protocol import BOARD_ID_ALL
+from .can_protocol import CAN_ID_BOARD3_SERVO_COMMAND
 from .can_protocol import DURATION_TICK_NS
 from .can_protocol import pack_enable
 from .socketcan_transport import SocketCanTransport
@@ -37,16 +38,22 @@ class TrajectoryStreamer:
         transport: SocketCanTransport,
         queue_wait_timeout_ms: int,
         completion_grace_ms: int,
+        board3_inter_frame_delay_ms: float = 0.0,
     ) -> None:
         if queue_wait_timeout_ms <= 0:
             raise ValueError('queue_wait_timeout_ms must be positive')
         if completion_grace_ms <= 0:
             raise ValueError('completion_grace_ms must be positive')
+        if board3_inter_frame_delay_ms < 0.0:
+            raise ValueError('board3_inter_frame_delay_ms cannot be negative')
 
         self._board_state = board_state
         self._transport = transport
         self._queue_wait_timeout_s = queue_wait_timeout_ms / 1000.0
         self._completion_grace_s = completion_grace_ms / 1000.0
+        self._board3_inter_frame_delay_s = (
+            float(board3_inter_frame_delay_ms) / 1000.0
+        )
 
     def stream(
         self,
@@ -96,12 +103,13 @@ class TrajectoryStreamer:
                     / 1_000_000_000.0
                 )
 
-                for frame in batch.frames:
+                for frame_index, frame in enumerate(batch.frames):
                     self._raise_if_cancelled(cancel_requested)
                     if motion_started_at_s is None:
                         motion_started_at_s = time.monotonic()
                     self._transport.send_frame(frame)
                     sent_any = True
+                    self._sleep_after_board3_frame(batch, frame_index)
 
                 expected_motion_time_s += duration_s
 
@@ -134,6 +142,22 @@ class TrajectoryStreamer:
         self._transport.send_frame(
             pack_enable(False, board_id=BOARD_ID_ALL)
         )
+
+    def _sleep_after_board3_frame(
+        self,
+        batch: TrajectoryBatch,
+        frame_index: int,
+    ) -> None:
+        if self._board3_inter_frame_delay_s <= 0.0:
+            return
+        if frame_index >= len(batch.frames) - 1:
+            return
+        if batch.frames[frame_index].can_id != CAN_ID_BOARD3_SERVO_COMMAND:
+            return
+        if batch.frames[frame_index + 1].can_id != CAN_ID_BOARD3_SERVO_COMMAND:
+            return
+
+        time.sleep(self._board3_inter_frame_delay_s)
 
     def _wait_for_queue_slots(
         self,

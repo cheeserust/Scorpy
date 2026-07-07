@@ -277,18 +277,17 @@ mission_manager
   -> VicPinky Nav2
 ```
 
-목표 좌표는 `mission_manager/config/locations.yaml`에 넣는다.
+목표 좌표는 `mission_manager/config/locations.yaml`의 `points`에 넣는다.
+중앙서버가 `room_402`, `elevator_front_4f` 같은 location alias로 자동
+확장해 `/nav/go_to`에 전달한다.
 
 ```yaml
-locations:
-  room_402:
-    floor: 4
-    marker_id: -1
-    type: navigation_goal
-    pose:
+points:
+  "4":
+    "402":
       frame_id: map
-      x: 0.0
-      y: 0.0
+      x: 2.998
+      y: -12.433
       yaw: 0.0
 ```
 

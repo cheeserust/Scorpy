@@ -25,16 +25,20 @@ ALIGN_ELEVATOR_TAG
 PRESS_ELEVATOR_CALL_BUTTON
 WAIT_ELEVATOR_OPEN
 ENTER_ELEVATOR
-ALIGN_INSIDE_ELEVATOR_TAG
 PRESS_5F_BUTTON
 WAIT_5F
-SWITCH_5F_MAP
 EXIT_ELEVATOR
+SWITCH_5F_MAP
 GO_TO_TARGET_PLACE
 ARM_TASK_AT_TARGET
 RETURN_TO_ELEVATOR
+ALIGN_ELEVATOR_TAG_RETURN
+PRESS_ELEVATOR_CALL_BUTTON_RETURN
+WAIT_ELEVATOR_OPEN_RETURN
+ENTER_ELEVATOR_RETURN
 PRESS_4F_BUTTON
 WAIT_4F
+EXIT_ELEVATOR_RETURN
 SWITCH_4F_MAP
 RETURN_HOME
 DONE
@@ -51,17 +55,21 @@ DONE
 | `ALIGN_ELEVATOR_TAG` | `dock_to_marker` | `/dock/align` | 주행/ArUco |
 | `PRESS_ELEVATOR_CALL_BUTTON` | `press_button` | `/arm/press_button` | 팔 |
 | `WAIT_ELEVATOR_OPEN` | `wait_door_open` | `/elevator/wait_door_open` | 주행/LiDAR |
-| `ENTER_ELEVATOR` | `dock_to_marker` | `/dock/align` | 주행/ArUco+Odom |
-| `ALIGN_INSIDE_ELEVATOR_TAG` | `dock_to_marker` | `/dock/align` | 주행/ArUco+Odom |
+| `ENTER_ELEVATOR` | `board_elevator` | `/elevator/board` | 주행/ArUco+cmd_vel |
 | `PRESS_5F_BUTTON` | `press_button` | `/arm/press_button` | 팔 |
 | `WAIT_5F` | `check_floor` | `/floor/check` | 주행/Floor Tag |
+| `EXIT_ELEVATOR` | `exit_elevator` | `/elevator/exit` | 주행/ArUco+cmd_vel |
 | `SWITCH_5F_MAP` | `map_switch` | `/map/switch` | 주행/Nav2 |
-| `EXIT_ELEVATOR` | `go_to` | `/nav/go_to` | 주행 |
 | `GO_TO_TARGET_PLACE` | `go_to` | `/nav/go_to` | 주행 |
 | `ARM_TASK_AT_TARGET` | `place` | `/arm/place` | 팔 |
 | `RETURN_TO_ELEVATOR` | `go_to` | `/nav/go_to` | 주행 |
+| `ALIGN_ELEVATOR_TAG_RETURN` | `dock_to_marker` | `/dock/align` | 주행/ArUco |
+| `PRESS_ELEVATOR_CALL_BUTTON_RETURN` | `press_button` | `/arm/press_button` | 팔 |
+| `WAIT_ELEVATOR_OPEN_RETURN` | `wait_door_open` | `/elevator/wait_door_open` | 주행/LiDAR |
+| `ENTER_ELEVATOR_RETURN` | `board_elevator` | `/elevator/board` | 주행/ArUco+cmd_vel |
 | `PRESS_4F_BUTTON` | `press_button` | `/arm/press_button` | 팔 |
 | `WAIT_4F` | `check_floor` | `/floor/check` | 주행/Floor Tag |
+| `EXIT_ELEVATOR_RETURN` | `exit_elevator` | `/elevator/exit` | 주행/ArUco+cmd_vel |
 | `SWITCH_4F_MAP` | `map_switch` | `/map/switch` | 주행/Nav2 |
 | `RETURN_HOME` | `go_to` | `/nav/go_to` | 주행 |
 
@@ -114,6 +122,12 @@ ros2 topic list | grep amcl
 /scan_filtered  엘리베이터 문 열림 감지
 /tag/floor_id   층 인식
 ```
+
+주행팀 map 좌표는 `mission_manager/config/locations.yaml`의 `points`에
+4층/5층별로 둔다. 중앙서버는 `points.4.402`를 `402`, `402_4f`,
+`room_402` 같은 location alias로 자동 확장한다. GUI/mission goal은
+alias를 써도 되고, 실제 `/nav/go_to` `target_name`은 주행팀
+`nav_points.yaml` 키인 `402`, `elevator_front` 같은 값으로 전달된다.
 
 층 전환은 `/map/switch`에서 Nav2 `load_map`과 `/initialpose` 재설정을
 수행하는 것을 기준으로 둔다. 현재 mock 서버에도 `/map/switch`가 있으므로

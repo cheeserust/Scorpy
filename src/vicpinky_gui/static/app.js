@@ -6,6 +6,9 @@ const state = {
   manualInitialized: { arm: false, gripper: false },
   manualSending: { arm: false, gripper: false },
   lastJointState: null,
+  locations: [],
+  directNavLocations: [],
+  navSending: false,
 };
 
 const elevatorFsmStates = [
@@ -14,16 +17,20 @@ const elevatorFsmStates = [
   "PRESS_ELEVATOR_CALL_BUTTON",
   "WAIT_ELEVATOR_OPEN",
   "ENTER_ELEVATOR",
-  "ALIGN_INSIDE_ELEVATOR_TAG",
   "PRESS_5F_BUTTON",
   "WAIT_5F",
-  "SWITCH_5F_MAP",
   "EXIT_ELEVATOR",
+  "SWITCH_5F_MAP",
   "GO_TO_TARGET_PLACE",
   "ARM_TASK_AT_TARGET",
   "RETURN_TO_ELEVATOR",
+  "ALIGN_ELEVATOR_TAG_RETURN",
+  "PRESS_ELEVATOR_CALL_BUTTON_RETURN",
+  "WAIT_ELEVATOR_OPEN_RETURN",
+  "ENTER_ELEVATOR_RETURN",
   "PRESS_4F_BUTTON",
   "WAIT_4F",
+  "EXIT_ELEVATOR_RETURN",
   "SWITCH_4F_MAP",
   "RETURN_HOME",
   "DONE",
@@ -127,12 +134,21 @@ const applyConfig = (config) => {
   if (state.configApplied || !config) return;
 
   const locations = Array.isArray(config.locations) ? config.locations : [];
+  const directNavLocations = Array.isArray(config.direct_nav_locations)
+    ? config.direct_nav_locations
+    : [];
+  const missionLocations = Array.isArray(config.mission_locations)
+    ? config.mission_locations
+    : [];
   const defaults = config.default_goal || {};
+  const navDefaults = config.default_nav || {};
   const pickup = $("pickupLocation");
   const delivery = $("deliveryLocation");
+  state.locations = locations;
+  state.directNavLocations = directNavLocations;
 
-  const options = locations.length
-    ? locations
+  const options = missionLocations.length
+    ? missionLocations
     : [
         { name: defaults.pickup_location || "home" },
         { name: defaults.delivery_location || "object_place" },
@@ -141,9 +157,7 @@ const applyConfig = (config) => {
   for (const select of [pickup, delivery]) {
     select.innerHTML = options
       .map((location) => {
-        const label = location.type
-          ? `${location.name} (${location.type})`
-          : location.name;
+        const label = location.label || location.name;
         return `<option value="${escapeHtml(location.name)}">${escapeHtml(label)}</option>`;
       })
       .join("");
@@ -154,10 +168,56 @@ const applyConfig = (config) => {
   $("targetFloor").value = defaults.target_floor ?? 5;
   pickup.value = defaults.pickup_location || "home";
   delivery.value = defaults.delivery_location || "object_place";
+  renderNavFloorOptions(navDefaults.target_floor ?? 4);
+  renderNavLocationOptions(
+    navDefaults.location_id || navDefaults.location_name || "4:home",
+  );
 
   renderFlow(config.mission_steps || []);
   renderManualControls(config.manual || {});
   state.configApplied = true;
+};
+
+const numericFloors = (locations) => {
+  const floors = locations
+    .map((location) => Number(location.floor))
+    .filter((floor) => Number.isInteger(floor));
+  return [...new Set(floors)].sort((left, right) => left - right);
+};
+
+const renderNavFloorOptions = (preferredFloor) => {
+  const floors = numericFloors(state.directNavLocations);
+  const options = floors.length ? floors : [4, 5];
+  $("navFloor").innerHTML = options
+    .map((floor) => `<option value="${escapeHtml(floor)}">${escapeHtml(floor)}F</option>`)
+    .join("");
+  const safeFloor = options.includes(Number(preferredFloor))
+    ? Number(preferredFloor)
+    : options[0];
+  $("navFloor").value = String(safeFloor);
+};
+
+const renderNavLocationOptions = (preferredLocation = "") => {
+  const floor = Number($("navFloor").value);
+  const candidates = state.directNavLocations.filter((location) => {
+    const locationFloor = Number(location.floor);
+    return Number.isInteger(locationFloor) && locationFloor === floor;
+  });
+  const options = candidates.length ? candidates : state.directNavLocations;
+  const previous = preferredLocation || $("navLocation").value;
+
+  $("navLocation").innerHTML = options
+    .map((location) => {
+      const labelParts = [location.name];
+      if (location.type) labelParts.push(location.type);
+      return `<option value="${escapeHtml(location.id)}">${escapeHtml(labelParts.join(" | "))}</option>`;
+    })
+    .join("");
+
+  const ids = options.map((location) => location.id);
+  if (ids.includes(previous)) {
+    $("navLocation").value = previous;
+  }
 };
 
 const renderFlow = (steps) => {
@@ -364,11 +424,12 @@ const renderManualStatus = (manual) => {
     `${last.controller || "manual"} ${last.state || "-"} | ${formatDuration(last.duration_sec)}${result ? ` | ${result}` : ""}`;
 };
 
-const renderMission = (mission) => {
+const renderMission = (mission, directNav) => {
   const status = mission.status;
   const feedback = mission.feedback;
   const result = mission.result;
   const goal = mission.goal;
+  const directNavActive = Boolean(directNav?.active);
 
   $("missionReady").textContent = mission.action_ready ? "Ready" : "Offline";
   $("missionReady").className = `status-chip ${mission.action_ready ? "success" : "danger"}`;
@@ -399,7 +460,8 @@ const renderMission = (mission) => {
     : "-";
   renderElevatorFsm(status, feedback);
 
-  $("startMissionButton").disabled = !mission.action_ready || mission.active;
+  $("startMissionButton").disabled =
+    !mission.action_ready || mission.active || directNavActive;
   $("cancelMissionButton").disabled = !mission.active;
 
   const missionHealth = status?.error || result?.success === false
@@ -415,6 +477,44 @@ const renderMission = (mission) => {
     status?.active_task || feedback?.current_task || "-";
   $("overviewTaskMeta").textContent =
     status?.message || feedback?.detail || result?.message || "No active task";
+};
+
+const renderDirectNav = (directNav, mission) => {
+  const ready = Boolean(directNav?.action_ready);
+  const active = Boolean(directNav?.active);
+  const missionActive = Boolean(mission?.active);
+  const goal = directNav?.goal;
+  const feedback = directNav?.feedback;
+  const result = directNav?.result;
+
+  $("navReady").textContent = ready ? "Ready" : "Offline";
+  $("navReady").className = `status-chip ${ready ? "success" : "danger"}`;
+
+  const stateText =
+    goal?.state ||
+    result?.status ||
+    (active ? "ACTIVE" : "IDLE");
+  $("navState").textContent =
+    `${stateText} | ${active ? "moving" : "idle"}`;
+
+  const targetText = goal
+    ? `${goal.location_name} -> ${goal.target_name} (${goal.target_floor}F)`
+    : "-";
+  $("navTarget").textContent = targetText;
+
+  const progress = Number(feedback?.progress);
+  $("navFeedback").textContent = feedback
+    ? `${feedback.phase || "-"} | ${Number.isFinite(progress) ? `${Math.round(progress * 100)}%` : "-"} | ${feedback.detail || ""}`
+    : "-";
+
+  $("navResult").textContent = result
+    ? `${result.status}: ${result.message}`
+    : "-";
+
+  const hasLocation = Boolean($("navLocation").value);
+  $("startNavButton").disabled =
+    !ready || active || missionActive || state.navSending || !hasLocation;
+  $("cancelNavButton").disabled = !active;
 };
 
 const renderRobotConnection = (connection) => {
@@ -687,7 +787,8 @@ const renderSnapshot = (snapshot) => {
   state.lastJointState = snapshot.joints.state;
   syncManualDefaultsFromJoints();
   renderRobotConnection(snapshot.robot_connection);
-  renderMission(snapshot.mission);
+  renderMission(snapshot.mission, snapshot.direct_nav);
+  renderDirectNav(snapshot.direct_nav, snapshot.mission);
   renderManualStatus(snapshot.manual);
   renderBoards(snapshot.arm);
   renderJoints(snapshot.joints);
@@ -810,9 +911,51 @@ const cancelMission = async () => {
   }
 };
 
+const startDirectNav = async (event) => {
+  event.preventDefault();
+  const selected = state.directNavLocations.find(
+    (location) => location.id === $("navLocation").value,
+  );
+  const payload = {
+    location_id: $("navLocation").value,
+    location_name: selected?.name || "",
+    target_floor: Number($("navFloor").value),
+  };
+
+  state.navSending = true;
+  $("startNavButton").disabled = true;
+
+  try {
+    await api("/api/nav/go-to", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await poll();
+  } catch (error) {
+    $("navState").textContent = error.message;
+    setConnection(error.message, "offline");
+  } finally {
+    state.navSending = false;
+    await poll();
+  }
+};
+
+const cancelDirectNav = async () => {
+  try {
+    await api("/api/nav/cancel", { method: "POST", body: "{}" });
+    await poll();
+  } catch (error) {
+    $("navState").textContent = error.message;
+    setConnection(error.message, "offline");
+  }
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   $("missionForm").addEventListener("submit", startMission);
   $("cancelMissionButton").addEventListener("click", cancelMission);
+  $("navForm").addEventListener("submit", startDirectNav);
+  $("cancelNavButton").addEventListener("click", cancelDirectNav);
+  $("navFloor").addEventListener("change", () => renderNavLocationOptions());
   $("statusButton").addEventListener("click", () => postArmCommand("status"));
   $("estopTopButton").addEventListener("click", () => postArmCommand("estop"));
   $("sendArmManualButton").addEventListener("click", () => sendManual("arm"));

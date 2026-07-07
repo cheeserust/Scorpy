@@ -276,6 +276,7 @@ class ArmCanBridgeNode(Node):
         self.declare_parameter('speed_raw', 0)
         self.declare_parameter('queue_wait_timeout_ms', 3000)
         self.declare_parameter('completion_grace_ms', 3000)
+        self.declare_parameter('board3_inter_frame_delay_ms', 3.0)
         self.declare_parameter('start_position_tolerance_rad', 0.02)
 
         self.declare_parameter(
@@ -451,6 +452,9 @@ class ArmCanBridgeNode(Node):
             ),
             completion_grace_ms=int(
                 self.get_parameter('completion_grace_ms').value
+            ),
+            board3_inter_frame_delay_ms=float(
+                self.get_parameter('board3_inter_frame_delay_ms').value
             ),
         )
 

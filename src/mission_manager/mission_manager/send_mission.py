@@ -20,6 +20,9 @@ FALLBACK_LOCATION_FLOORS = {
     'home': 4,
     'home_4f': 4,
     'object': 4,
+    '401': 4,
+    '402': 4,
+    '402_return_test': 4,
     'room_401': 4,
     'room_402': 4,
     'elevator_front_4f': 4,
@@ -27,6 +30,7 @@ FALLBACK_LOCATION_FLOORS = {
     'map_4f': 4,
     'pickup_zone': 4,
     'dock_5f': 5,
+    '501': 5,
     'object_place': 5,
     'object_place_5f': 5,
     'room_501': 5,
@@ -178,15 +182,17 @@ def _load_location_floors() -> dict[str, int]:
     except Exception:
         return floors
 
-    locations = data.get('locations', {}) if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return floors
+
+    _add_point_location_floors(floors, data.get('points', {}))
+
+    locations = data.get('locations', {})
     if not isinstance(locations, dict):
         return floors
 
     for name, location in locations.items():
         if not isinstance(location, dict):
-            continue
-
-        if 'pose' not in location:
             continue
 
         floor = location.get('floor')
@@ -196,6 +202,43 @@ def _load_location_floors() -> dict[str, int]:
             floors[str(name)] = int(floor)
 
     return floors
+
+
+def _add_point_location_floors(
+    floors: dict[str, int],
+    points: object,
+) -> None:
+    if not isinstance(points, dict):
+        return
+
+    point_counts: dict[str, int] = {}
+
+    for floor_points in points.values():
+        if not isinstance(floor_points, dict):
+            continue
+
+        for point_name in floor_points:
+            name = str(point_name)
+            point_counts[name] = point_counts.get(name, 0) + 1
+
+    for floor_key, floor_points in points.items():
+        if not isinstance(floor_points, dict):
+            continue
+
+        try:
+            floor = int(floor_key)
+        except (TypeError, ValueError):
+            continue
+
+        for point_name in floor_points:
+            name = str(point_name)
+            floors[f'{name}_{floor}f'] = floor
+
+            if point_counts.get(name, 0) == 1:
+                floors[name] = floor
+
+            if name.isdigit():
+                floors[f'room_{name}'] = floor
 
 
 def _infer_target_floor(

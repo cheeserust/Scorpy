@@ -8,7 +8,7 @@ servers:
       - arrived
 
   /dock/align:
-    delay_sec: 2.0
+    delay_sec: 3.0
     success: true
     phases:
       - searching_marker
@@ -54,6 +54,22 @@ servers:
       - waiting
       - checking_door
       - door_open
+
+  /elevator/board:
+    delay_sec: 5.0
+    success: true
+    phases:
+      - wait_board_marker
+      - boarding
+      - boarded
+
+  /elevator/exit:
+    delay_sec: 5.0
+    success: true
+    phases:
+      - wait_floor_marker
+      - exiting
+      - exited
 
   /floor/check:
     delay_sec: 2.0

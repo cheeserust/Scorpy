@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import re
+import socket
 import threading
 import time
 from typing import Any
@@ -29,7 +30,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectoryPoint
-from vicpinky_interfaces.action import ExecuteMission
+from vicpinky_interfaces.action import ExecuteMission, RunTask
 from vicpinky_interfaces.msg import MissionStatus
 from werkzeug.serving import make_server
 import yaml
@@ -237,6 +238,10 @@ class VicPinkyGuiNode(Node):
         self._mission_goal: dict[str, Any] | None = None
         self._mission_result: dict[str, Any] | None = None
         self._mission_goal_handle = None
+        self._nav_goal: dict[str, Any] | None = None
+        self._nav_feedback: dict[str, Any] | None = None
+        self._nav_result: dict[str, Any] | None = None
+        self._nav_goal_handle = None
 
         self._latest_arm_status_raw: str | None = None
         self._latest_arm_status_seen_at: float | None = None
@@ -272,6 +277,12 @@ class VicPinkyGuiNode(Node):
             self,
             ExecuteMission,
             '/mission/execute',
+            callback_group=self._callback_group,
+        )
+        self._nav_client = ActionClient(
+            self,
+            RunTask,
+            '/nav/go_to',
             callback_group=self._callback_group,
         )
         self._arm_clients = {
@@ -338,6 +349,7 @@ class VicPinkyGuiNode(Node):
 
     def _declare_parameters(self) -> None:
         mission_share = self._package_share_or_empty('mission_manager')
+        driving_share = self._package_share_or_empty('vicpinky_task_servers')
         default_locations = os.path.join(
             mission_share,
             'config',
@@ -348,6 +360,11 @@ class VicPinkyGuiNode(Node):
             'config',
             'mission_flow.yaml',
         ) if mission_share else ''
+        default_nav_points = os.path.join(
+            driving_share,
+            'config',
+            'nav_points.yaml',
+        ) if driving_share else ''
 
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 8080)
@@ -361,6 +378,7 @@ class VicPinkyGuiNode(Node):
         self.declare_parameter('mission_event_topic', '/mission/event_log')
         self.declare_parameter('locations_file', default_locations)
         self.declare_parameter('mission_flow_file', default_flow)
+        self.declare_parameter('nav_points_file', default_nav_points)
 
     def _start_http_server(self) -> None:
         static_dir = self._static_dir()
@@ -440,6 +458,22 @@ class VicPinkyGuiNode(Node):
             response = self.cancel_mission()
             return jsonify(response), 200 if response.get('ok') else 409
 
+        @app.post('/api/nav/go-to')
+        def api_nav_go_to():
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                payload = {}
+            response = self.start_direct_nav(payload)
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
+
+        @app.post('/api/nav/cancel')
+        def api_nav_cancel():
+            response = self.cancel_direct_nav()
+            return jsonify(response), 200 if response.get('ok') else 409
+
         @app.errorhandler(404)
         def api_not_found(_error):
             return jsonify({
@@ -458,9 +492,25 @@ class VicPinkyGuiNode(Node):
         else:
             candidate_ports = [self._port]
 
-        last_error: OSError | None = None
+        last_error: BaseException | None = None
 
         for candidate_port in candidate_ports:
+            if (
+                candidate_port != 0
+                and not self._http_port_available(self._host, candidate_port)
+            ):
+                last_error = OSError(
+                    errno.EADDRINUSE,
+                    f'HTTP port {candidate_port} is already in use',
+                )
+                if self._auto_port:
+                    self.get_logger().warning(
+                        f'HTTP port {candidate_port} is already in use; '
+                        'trying the next port'
+                    )
+                    continue
+                raise last_error
+
             try:
                 server = make_server(
                     self._host,
@@ -473,6 +523,15 @@ class VicPinkyGuiNode(Node):
                 if exc.errno == errno.EADDRINUSE and self._auto_port:
                     self.get_logger().warning(
                         f'HTTP port {candidate_port} is already in use; '
+                        'trying the next port'
+                    )
+                    continue
+                raise
+            except SystemExit as exc:
+                last_error = exc
+                if self._auto_port:
+                    self.get_logger().warning(
+                        f'HTTP port {candidate_port} could not be bound; '
                         'trying the next port'
                     )
                     continue
@@ -493,6 +552,30 @@ class VicPinkyGuiNode(Node):
             message = f'{message}: {last_error}'
         raise OSError(message)
 
+    @staticmethod
+    def _http_port_available(host: str, port: int) -> bool:
+        try:
+            address_infos = socket.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        except socket.gaierror:
+            return False
+
+        for family, socktype, proto, _canonname, sockaddr in address_infos:
+            try:
+                with socket.socket(family, socktype, proto) as probe:
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    probe.bind(sockaddr)
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    return False
+                continue
+            return True
+
+        return False
+
     def _static_dir(self) -> Path:
         package_share = self._package_share_or_empty('vicpinky_gui')
         if package_share:
@@ -512,28 +595,59 @@ class VicPinkyGuiNode(Node):
     def _load_gui_config(self) -> dict[str, Any]:
         locations_file = str(self.get_parameter('locations_file').value)
         mission_flow_file = str(self.get_parameter('mission_flow_file').value)
+        nav_points_file = str(self.get_parameter('nav_points_file').value)
 
         locations: list[dict[str, Any]] = []
+        direct_nav_locations: list[dict[str, Any]] = []
+        mission_locations: list[dict[str, Any]] = []
         mission_steps: list[dict[str, Any]] = []
+        location_data: dict[str, Any] = {}
 
         try:
             location_data = self._read_yaml(locations_file)
+            location_options: dict[str, dict[str, Any]] = {}
+            self._add_point_location_options(
+                location_options,
+                location_data.get('points'),
+            )
+
             raw_locations = location_data.get('locations', {})
             if isinstance(raw_locations, dict):
                 for name, value in raw_locations.items():
-                    item = {'name': str(name)}
-                    if isinstance(value, dict):
-                        if 'pose' not in value:
-                            continue
-                        item.update({
-                            'type': value.get('type', ''),
-                            'floor': value.get('floor', ''),
-                            'marker_id': value.get('marker_id', ''),
-                        })
-                    locations.append(item)
+                    if not isinstance(value, dict):
+                        continue
+
+                    if 'pose' not in value and 'point' not in value:
+                        continue
+
+                    self._add_location_option(
+                        location_options,
+                        name=str(name),
+                        location=value,
+                    )
+
+            locations = list(location_options.values())
         except Exception as exc:
             self.get_logger().warning(
                 f'Failed to load GUI locations from {locations_file}: {exc}'
+            )
+
+        try:
+            nav_point_data = (
+                self._read_yaml(nav_points_file)
+                if nav_points_file and os.path.exists(nav_points_file)
+                else location_data
+            )
+            direct_nav_locations = self._direct_nav_locations_from_points(
+                nav_point_data.get('points'),
+            )
+            mission_locations = self._mission_locations_from_direct_nav(
+                direct_nav_locations,
+            )
+        except Exception as exc:
+            self.get_logger().warning(
+                f'Failed to load direct nav points from '
+                f'{nav_points_file or locations_file}: {exc}'
             )
 
         try:
@@ -556,6 +670,8 @@ class VicPinkyGuiNode(Node):
 
         return {
             'locations': locations,
+            'direct_nav_locations': direct_nav_locations,
+            'mission_locations': mission_locations,
             'mission_steps': mission_steps,
             'default_goal': {
                 'mission_id': self._default_mission_id(),
@@ -564,9 +680,174 @@ class VicPinkyGuiNode(Node):
                 'target_floor': 5,
                 'object_label': 'box',
             },
+            'default_nav': {
+                'location_name': 'home',
+                'location_id': '4:home',
+                'target_floor': 4,
+            },
             'arm_commands': list(ARM_COMMANDS.keys()),
             'manual': deepcopy(MANUAL_CONTROLLERS),
         }
+
+    @classmethod
+    def _add_point_location_options(
+        cls,
+        location_options: dict[str, dict[str, Any]],
+        points: Any,
+    ) -> None:
+        if not isinstance(points, dict):
+            return
+
+        point_counts: dict[str, int] = {}
+        for floor_points in points.values():
+            if not isinstance(floor_points, dict):
+                continue
+            for point_name in floor_points:
+                key = str(point_name)
+                point_counts[key] = point_counts.get(key, 0) + 1
+
+        for floor_key, floor_points in points.items():
+            if not isinstance(floor_points, dict):
+                continue
+
+            try:
+                floor = int(floor_key)
+            except (TypeError, ValueError):
+                floor = floor_key
+
+            for point_name, pose in floor_points.items():
+                name = str(point_name)
+                location = {
+                    'type': cls._infer_gui_point_type(name),
+                    'floor': floor,
+                    'marker_id': -1,
+                    'nav_target': name,
+                    'pose': pose,
+                }
+
+                cls._add_location_option(
+                    location_options,
+                    name=f'{name}_{floor}f',
+                    location=location,
+                )
+
+                if point_counts.get(name, 0) == 1:
+                    cls._add_location_option(
+                        location_options,
+                        name=name,
+                        location=location,
+                    )
+
+                if name.isdigit():
+                    cls._add_location_option(
+                        location_options,
+                        name=f'room_{name}',
+                        location=location,
+                    )
+
+    @classmethod
+    def _direct_nav_locations_from_points(
+        cls,
+        points: Any,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(points, dict):
+            return []
+
+        locations: list[dict[str, Any]] = []
+        for floor_key, floor_points in points.items():
+            if not isinstance(floor_points, dict):
+                continue
+
+            try:
+                floor = int(floor_key)
+            except (TypeError, ValueError):
+                continue
+
+            for point_name, pose in floor_points.items():
+                name = str(point_name)
+                location = {
+                    'id': f'{floor}:{name}',
+                    'name': name,
+                    'type': cls._infer_gui_point_type(name),
+                    'floor': floor,
+                    'marker_id': -1,
+                    'nav_target': name,
+                }
+                if isinstance(pose, dict):
+                    location['pose'] = deepcopy(pose)
+                locations.append(location)
+
+        return locations
+
+    @staticmethod
+    def _mission_locations_from_direct_nav(
+        direct_nav_locations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        point_counts: dict[str, int] = {}
+        for location in direct_nav_locations:
+            name = str(location.get('name', ''))
+            if not name:
+                continue
+            point_counts[name] = point_counts.get(name, 0) + 1
+
+        mission_locations: list[dict[str, Any]] = []
+        for location in direct_nav_locations:
+            name = str(location.get('name', ''))
+            if not name:
+                continue
+
+            floor = location.get('floor', '')
+            value = name
+            if point_counts.get(name, 0) > 1:
+                value = f'{name}_{floor}f'
+
+            mission_locations.append({
+                'name': value,
+                'label': f'{floor}F {name}',
+                'floor': floor,
+                'type': location.get('type', ''),
+                'nav_target': name,
+            })
+
+        return mission_locations
+
+    @staticmethod
+    def _add_location_option(
+        location_options: dict[str, dict[str, Any]],
+        *,
+        name: str,
+        location: dict[str, Any],
+    ) -> None:
+        item = {
+            'name': name,
+            'type': location.get('type', ''),
+            'floor': location.get('floor', ''),
+            'marker_id': location.get('marker_id', ''),
+        }
+        if 'nav_target' in location:
+            item['nav_target'] = location.get('nav_target', '')
+        elif 'point' in location:
+            item['nav_target'] = str(location.get('point', ''))
+
+        pose = location.get('pose')
+        if isinstance(pose, dict):
+            item['pose'] = deepcopy(pose)
+
+        location_options[name] = item
+
+    @staticmethod
+    def _infer_gui_point_type(point_name: str) -> str:
+        point_types = {
+            'dock': 'dock',
+            'home': 'home',
+            'elevator_front': 'navigation_goal',
+            '401': 'delivery_zone',
+            '402': 'pickup_zone',
+            '402_return_test': 'navigation_goal',
+            '501': 'delivery_zone',
+            'object_place': 'pickup_zone',
+        }
+        return point_types.get(point_name, 'navigation_goal')
 
     @staticmethod
     def _read_yaml(path: str) -> dict[str, Any]:
@@ -689,6 +970,9 @@ class VicPinkyGuiNode(Node):
             mission_feedback = deepcopy(self._mission_feedback)
             mission_goal = deepcopy(self._mission_goal)
             mission_result = deepcopy(self._mission_result)
+            nav_goal = deepcopy(self._nav_goal)
+            nav_feedback = deepcopy(self._nav_feedback)
+            nav_result = deepcopy(self._nav_result)
             arm_status = deepcopy(self._latest_arm_status)
             arm_status_raw = self._latest_arm_status_raw
             arm_log = list(self._arm_status_log)
@@ -697,6 +981,7 @@ class VicPinkyGuiNode(Node):
             event_log = list(self._event_log)
             mission_events = list(self._mission_event_log)
             mission_active = self._mission_goal_handle is not None
+            nav_active = self._nav_goal_handle is not None
             manual_last_commands = deepcopy(self._manual_last_commands)
             manual_feedback = deepcopy(self._manual_feedback)
             manual_active = {
@@ -731,6 +1016,13 @@ class VicPinkyGuiNode(Node):
                 'result': mission_result,
                 'active': mission_active,
                 'action_ready': self._mission_action_ready(),
+            },
+            'direct_nav': {
+                'goal': nav_goal,
+                'feedback': nav_feedback,
+                'result': nav_result,
+                'active': nav_active,
+                'action_ready': self._nav_action_ready(),
             },
             'arm': {
                 'parsed_status': arm_status,
@@ -862,6 +1154,12 @@ class VicPinkyGuiNode(Node):
     def _mission_action_ready(self) -> bool:
         try:
             return bool(self._mission_client.server_is_ready())
+        except Exception:
+            return False
+
+    def _nav_action_ready(self) -> bool:
+        try:
+            return bool(self._nav_client.server_is_ready())
         except Exception:
             return False
 
@@ -1285,6 +1583,328 @@ class VicPinkyGuiNode(Node):
                 ),
             )
 
+    def start_direct_nav(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send one same-floor /nav/go_to RunTask goal."""
+        with self._lock:
+            if self._mission_goal_handle is not None:
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'Direct navigation is blocked while a mission is active',
+                }
+            if self._nav_goal_handle is not None:
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'A direct navigation goal is already active',
+                }
+
+        if not self._nav_action_ready():
+            self._nav_client.wait_for_server(timeout_sec=0.25)
+
+        if not self._nav_action_ready():
+            return {
+                'ok': False,
+                'status_code': 503,
+                'message': '/nav/go_to action server is not ready',
+            }
+
+        try:
+            goal_msg, goal_summary = self._nav_goal_from_payload(payload)
+        except (TypeError, ValueError) as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': str(exc),
+            }
+
+        with self._lock:
+            self._nav_goal = {
+                **goal_summary,
+                'state': 'SENDING',
+                'sent_at': self._now_iso(),
+            }
+            self._nav_feedback = None
+            self._nav_result = None
+            self._append_event_locked(
+                kind='nav',
+                level='info',
+                message=(
+                    f'Sending direct nav to '
+                    f'{goal_summary["location_name"]}'
+                ),
+            )
+
+        send_future = self._nav_client.send_goal_async(
+            goal_msg,
+            feedback_callback=self._nav_feedback_callback,
+        )
+        goal_handle = self._wait_for_future(send_future)
+
+        if goal_handle is None:
+            with self._lock:
+                if self._nav_goal is not None:
+                    self._nav_goal['state'] = 'SEND_TIMEOUT'
+                self._append_event_locked(
+                    kind='nav',
+                    level='error',
+                    message='Direct nav send timed out',
+                )
+            return {
+                'ok': False,
+                'status_code': 504,
+                'message': 'Timed out while sending direct navigation goal',
+            }
+
+        if not goal_handle.accepted:
+            with self._lock:
+                if self._nav_goal is not None:
+                    self._nav_goal['state'] = 'REJECTED'
+                self._append_event_locked(
+                    kind='nav',
+                    level='error',
+                    message=(
+                        f'Direct nav rejected: '
+                        f'{goal_summary["location_name"]}'
+                    ),
+                )
+            return {
+                'ok': False,
+                'status_code': 409,
+                'message': 'Direct navigation goal was rejected',
+            }
+
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._nav_result_callback)
+
+        with self._lock:
+            self._nav_goal_handle = goal_handle
+            if self._nav_goal is not None:
+                self._nav_goal['state'] = 'ACCEPTED'
+                self._nav_goal['accepted_at'] = self._now_iso()
+            self._append_event_locked(
+                kind='nav',
+                level='info',
+                message=(
+                    f'Direct nav accepted: '
+                    f'{goal_summary["location_name"]}'
+                ),
+            )
+
+        return {
+            'ok': True,
+            'message': 'Direct navigation goal accepted',
+            'goal': goal_summary,
+        }
+
+    def _nav_goal_from_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[RunTask.Goal, dict[str, Any]]:
+        location_id = str(payload.get('location_id') or '').strip()
+        location_name = str(
+            payload.get('location_name')
+            or payload.get('target')
+            or ''
+        ).strip()
+        if not location_id and not location_name:
+            raise ValueError('location_id is required')
+
+        location = self._nav_location_from_payload(
+            location_id=location_id,
+            location_name=location_name,
+        )
+        if location is None:
+            target = location_id or location_name
+            raise ValueError(f'Unknown navigation location: {target}')
+
+        location_name = str(location.get('name') or location_name).strip()
+
+        if 'nav_target' not in location and 'pose' not in location:
+            raise ValueError(
+                f'Location is not a saved navigation point: {location_name}'
+            )
+
+        location_floor = self._optional_int(location.get('floor'))
+        target_floor = self._required_int(
+            payload.get('target_floor', location_floor),
+            'target_floor',
+        )
+        if target_floor <= 0:
+            raise ValueError('target_floor must be greater than zero')
+
+        if location_floor is not None and location_floor != target_floor:
+            raise ValueError(
+                f'{location_name} is on floor {location_floor}, '
+                f'but current floor is {target_floor}'
+            )
+
+        target_name = str(
+            location.get('nav_target') or location_name
+        ).strip()
+        if not target_name:
+            target_name = location_name
+
+        marker_id = self._optional_int(location.get('marker_id'))
+        if marker_id is None:
+            marker_id = -1
+
+        extra_payload: dict[str, Any] = {
+            'location_name': location_name,
+            'location_type': str(location.get('type', '')),
+            'direct_nav': True,
+        }
+        pose = location.get('pose')
+        if isinstance(pose, dict):
+            extra_payload['pose'] = deepcopy(pose)
+
+        goal_msg = RunTask.Goal()
+        goal_msg.task_id = 'go_to'
+        goal_msg.target_name = target_name
+        goal_msg.target_floor = target_floor
+        goal_msg.marker_id = marker_id
+        goal_msg.extra_json = json.dumps(
+            extra_payload,
+            ensure_ascii=False,
+        )
+
+        return goal_msg, {
+            'task_id': goal_msg.task_id,
+            'server': '/nav/go_to',
+            'location_id': str(location.get('id', '')),
+            'location_name': location_name,
+            'target_name': target_name,
+            'target_floor': target_floor,
+            'marker_id': marker_id,
+            'extra_json': goal_msg.extra_json,
+        }
+
+    def _nav_location_from_payload(
+        self,
+        *,
+        location_id: str,
+        location_name: str,
+    ) -> dict[str, Any] | None:
+        locations = self._gui_config.get('direct_nav_locations', [])
+        if not locations:
+            locations = self._gui_config.get('locations', [])
+
+        for location in locations:
+            if not isinstance(location, dict):
+                continue
+            if location_id and str(location.get('id', '')) == location_id:
+                return location
+            if location_id:
+                continue
+            if str(location.get('name', '')) == location_name:
+                return location
+        return None
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value is None or value == '':
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _required_int(cls, value: Any, field_name: str) -> int:
+        result = cls._optional_int(value)
+        if result is None:
+            raise ValueError(f'{field_name} must be an integer')
+        return result
+
+    def _nav_feedback_callback(self, feedback_msg: Any) -> None:
+        feedback = feedback_msg.feedback
+        with self._lock:
+            self._nav_feedback = {
+                'phase': feedback.phase,
+                'progress': float(feedback.progress),
+                'detail': feedback.detail,
+                'received_at': self._now_iso(),
+            }
+
+    def _nav_result_callback(self, future: Any) -> None:
+        try:
+            result_response = future.result()
+        except Exception as exc:
+            result_payload = {
+                'ok': False,
+                'status': 'ERROR',
+                'success': False,
+                'message': str(exc),
+                'received_at': self._now_iso(),
+            }
+        else:
+            result = result_response.result
+            status_name = STATUS_NAME_BY_CODE.get(
+                result_response.status,
+                f'STATUS_{result_response.status}',
+            )
+            result_payload = {
+                'ok': bool(result.success),
+                'status': status_name,
+                'success': bool(result.success),
+                'message': result.message,
+                'received_at': self._now_iso(),
+            }
+
+        with self._lock:
+            self._nav_result = result_payload
+            self._nav_goal_handle = None
+            if self._nav_goal is not None:
+                self._nav_goal['state'] = result_payload['status']
+                self._nav_goal['finished_at'] = result_payload['received_at']
+            self._append_event_locked(
+                kind='nav',
+                level='info' if result_payload['success'] else 'error',
+                message=(
+                    f'Direct nav {result_payload["status"]}: '
+                    f'{result_payload["message"]}'
+                ),
+            )
+
+    def cancel_direct_nav(self) -> dict[str, Any]:
+        """Cancel the active direct navigation goal if one exists."""
+        with self._lock:
+            goal_handle = self._nav_goal_handle
+
+        if goal_handle is None:
+            return {
+                'ok': False,
+                'message': 'No active direct navigation goal to cancel',
+            }
+
+        cancel_future = goal_handle.cancel_goal_async()
+        response = self._wait_for_future(cancel_future)
+
+        if response is None:
+            return {
+                'ok': False,
+                'message': 'Timed out while canceling direct navigation goal',
+            }
+
+        canceling = len(response.goals_canceling) > 0
+        with self._lock:
+            if self._nav_goal is not None:
+                self._nav_goal['state'] = (
+                    'CANCELING' if canceling else 'CANCEL_REJECTED'
+                )
+            self._append_event_locked(
+                kind='nav',
+                level='info' if canceling else 'error',
+                message='Direct nav cancel requested'
+                if canceling else 'Direct nav cancel rejected',
+            )
+
+        return {
+            'ok': canceling,
+            'message': 'Direct nav cancel requested'
+            if canceling else 'Direct nav cancel rejected',
+        }
+
     def start_mission(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send an ExecuteMission goal from the dashboard."""
         with self._lock:
@@ -1293,6 +1913,12 @@ class VicPinkyGuiNode(Node):
                     'ok': False,
                     'status_code': 409,
                     'message': 'A mission goal is already active',
+                }
+            if self._nav_goal_handle is not None:
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'Mission start is blocked while direct navigation is active',
                 }
 
         if not self._mission_action_ready():

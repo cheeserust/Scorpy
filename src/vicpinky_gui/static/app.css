@@ -272,6 +272,23 @@ label {
   grid-column: span 2;
 }
 
+.nav-form {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.42fr) minmax(180px, 1fr) minmax(150px, 0.58fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.nav-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.nav-panel .status-list {
+  margin-top: 14px;
+}
+
 .form-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -626,6 +643,7 @@ label {
 
 .joint-panel,
 .flow-panel,
+.nav-panel,
 .link-panel {
   align-self: start;
 }
@@ -828,6 +846,8 @@ label {
   }
 
   .mission-form,
+  .nav-form,
+  .nav-actions,
   .command-bar,
   .manual-layout,
   .manual-actions,

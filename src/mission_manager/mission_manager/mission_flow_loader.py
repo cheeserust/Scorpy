@@ -33,12 +33,7 @@ class MissionFlowLoader:
                 'mission_flow.yaml must contain mission.steps'
             ) from exc
 
-        try:
-            self._locations = location_data['locations']
-        except (KeyError, TypeError) as exc:
-            raise MissionConfigError(
-                'locations.yaml must contain locations'
-            ) from exc
+        self._locations = self._load_locations(location_data)
 
         try:
             self._actions = action_data['actions']
@@ -63,6 +58,224 @@ class MissionFlowLoader:
             )
 
         return data
+
+    @classmethod
+    def _load_locations(
+        cls,
+        location_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        points = location_data.get('points')
+        raw_locations = location_data.get('locations')
+
+        if points is None and raw_locations is None:
+            raise MissionConfigError(
+                'locations.yaml must contain locations or points'
+            )
+
+        locations: Dict[str, Any] = {}
+
+        if points is not None:
+            locations.update(cls._locations_from_points(points))
+
+        if raw_locations is None:
+            return locations
+
+        if not isinstance(raw_locations, dict):
+            raise MissionConfigError('locations must be a mapping')
+
+        for name, location in raw_locations.items():
+            location_name = str(name)
+
+            if not isinstance(location, dict):
+                locations[location_name] = location
+                continue
+
+            normalized = dict(location)
+
+            if 'point' in normalized:
+                if points is None:
+                    raise MissionConfigError(
+                        f'locations.{location_name}.point requires points'
+                    )
+
+                normalized['pose'] = cls._pose_for_point_location(
+                    location_name=location_name,
+                    location=normalized,
+                    points=points,
+                )
+                normalized.setdefault('marker_id', -1)
+                normalized.setdefault('nav_target', str(normalized['point']))
+
+            locations[location_name] = normalized
+
+        return locations
+
+    @classmethod
+    def _locations_from_points(
+        cls,
+        points: Any,
+    ) -> Dict[str, Any]:
+        if not isinstance(points, dict):
+            raise MissionConfigError('points must be a mapping')
+
+        point_counts: Dict[str, int] = {}
+
+        for floor_points in points.values():
+            if not isinstance(floor_points, dict):
+                raise MissionConfigError(
+                    'points.<floor> must be a mapping'
+                )
+
+            for point_name in floor_points:
+                name = str(point_name)
+                point_counts[name] = point_counts.get(name, 0) + 1
+
+        locations: Dict[str, Any] = {}
+
+        for floor_key, floor_points in points.items():
+            floor = cls._floor_from_key(floor_key)
+
+            for point_name, pose in floor_points.items():
+                name = str(point_name)
+                location = cls._location_from_point(
+                    floor=floor,
+                    point_name=name,
+                    pose=pose,
+                )
+
+                locations[f'{name}_{floor}f'] = dict(location)
+
+                if point_counts[name] == 1:
+                    locations[name] = dict(location)
+
+                if name.isdigit():
+                    locations[f'room_{name}'] = dict(location)
+
+        return locations
+
+    @classmethod
+    def _location_from_point(
+        cls,
+        *,
+        floor: int,
+        point_name: str,
+        pose: Any,
+    ) -> Dict[str, Any]:
+        return {
+            'floor': floor,
+            'marker_id': -1,
+            'type': cls._infer_point_type(point_name),
+            'nav_target': point_name,
+            'pose': cls._normalize_pose(
+                location_name=point_name,
+                pose=pose,
+            ),
+        }
+
+    @staticmethod
+    def _infer_point_type(point_name: str) -> str:
+        point_types = {
+            'dock': 'dock',
+            'home': 'home',
+            'elevator_front': 'navigation_goal',
+            '401': 'delivery_zone',
+            '402': 'pickup_zone',
+            '402_return_test': 'navigation_goal',
+            '501': 'delivery_zone',
+            'object_place': 'pickup_zone',
+        }
+
+        return point_types.get(point_name, 'navigation_goal')
+
+    @classmethod
+    def _pose_for_point_location(
+        cls,
+        *,
+        location_name: str,
+        location: Dict[str, Any],
+        points: Any,
+    ) -> Dict[str, Any]:
+        floor = cls._floor_from_key(
+            location.get('floor'),
+            location_name=location_name,
+        )
+        point_name = str(location['point'])
+
+        if not isinstance(points, dict):
+            raise MissionConfigError('points must be a mapping')
+
+        if floor in points:
+            floor_points = points[floor]
+        elif str(floor) in points:
+            floor_points = points[str(floor)]
+        else:
+            raise MissionConfigError(
+                f'No points configured for floor {floor} '
+                f'in location "{location_name}"'
+            )
+
+        if not isinstance(floor_points, dict):
+            raise MissionConfigError(
+                f'points.{floor} must be a mapping'
+            )
+
+        if point_name not in floor_points:
+            raise MissionConfigError(
+                f'No point "{point_name}" configured for floor {floor} '
+                f'in location "{location_name}"'
+            )
+
+        return cls._normalize_pose(
+            location_name=location_name,
+            pose=floor_points[point_name],
+        )
+
+    @staticmethod
+    def _floor_from_key(
+        floor_key: Any,
+        *,
+        location_name: str = '',
+    ) -> int:
+        try:
+            return int(floor_key)
+        except (TypeError, ValueError) as exc:
+            if location_name:
+                raise MissionConfigError(
+                    f'locations.{location_name}.floor must be numeric '
+                    'when using point'
+                ) from exc
+
+            raise MissionConfigError(
+                f'points floor key must be numeric: {floor_key}'
+            ) from exc
+
+    @staticmethod
+    def _normalize_pose(
+        *,
+        location_name: str,
+        pose: Any,
+    ) -> Dict[str, Any]:
+        if not isinstance(pose, dict):
+            raise MissionConfigError(
+                f'pose for "{location_name}" must be a mapping'
+            )
+
+        normalized = dict(pose)
+        normalized.setdefault('frame_id', 'map')
+
+        try:
+            normalized['x'] = float(normalized['x'])
+            normalized['y'] = float(normalized['y'])
+            normalized['yaw'] = float(normalized['yaw'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MissionConfigError(
+                f'pose for "{location_name}" must contain numeric '
+                'x, y, and yaw'
+            ) from exc
+
+        normalized['frame_id'] = str(normalized['frame_id'])
+
+        return normalized
 
     def _validate_static_config(self) -> None:
         if not isinstance(self._raw_steps, list) or not self._raw_steps:
@@ -294,6 +507,18 @@ class MissionFlowLoader:
                 context_values=context_values,
             )
 
+            if (
+                task_profile == 'go_to'
+                and target_name == location_name
+                and 'nav_target' in location
+            ):
+                target_name = str(
+                    self._resolve_value(
+                        location['nav_target'],
+                        context_values,
+                    )
+                )
+
             extra_payload: Dict[str, Any] = {
                 'location_name': location_name,
             }
@@ -301,8 +526,9 @@ class MissionFlowLoader:
             if 'type' in location:
                 extra_payload['location_type'] = str(location['type'])
 
-            # 좌표 소유권을 중앙서버가 가지기로 결정했을 때만
-            # locations.yaml에 pose를 추가하면 자동 전달된다.
+            # points 또는 locations.point에서 풀린 pose는 주행
+            # adapter로 전달된다. marker/button 작업처럼 pose가
+            # 없으면 생략한다.
             if 'pose' in location:
                 extra_payload['pose'] = self._resolve_value(
                     location['pose'],

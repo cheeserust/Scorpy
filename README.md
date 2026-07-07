@@ -46,12 +46,14 @@ src/
 | --- | --- | --- |
 | `go_to` | `/nav/go_to` | mock 또는 `vicpinky_nav_adapter` |
 | `dock_to_marker` | `/dock/align` | mock 제공 |
+| `board_elevator` | `/elevator/board` | 주행팀 엘리베이터 탑승 서버 |
+| `exit_elevator` | `/elevator/exit` | 주행팀 엘리베이터 하차 서버 |
 | `pick` | `/arm/pick` | mock 제공 |
 | `place` | `/arm/place` | mock 제공 |
 | `press_button` | `/arm/press_button` | mock 제공 |
-| `wait_door_open` | `/elevator/wait_door_open` | mock 제공, 실제 LiDAR 연결 예정 |
-| `check_floor` | `/floor/check` | mock 제공, 실제 floor tag 연결 예정 |
-| `map_switch` | `/map/switch` | mock 제공, 실제 Nav2 load_map 연결 예정 |
+| `wait_door_open` | `/elevator/wait_door_open` | 주행팀 문 열림 감지 서버 |
+| `check_floor` | `/floor/check` | 주행팀 floor tag 확인 서버 |
+| `map_switch` | `/map/switch` | 주행팀 map 전환 서버 |
 
 최종 미션 flow는 아래 상태 머신을 따른다.
 
@@ -61,16 +63,20 @@ ALIGN_ELEVATOR_TAG
 PRESS_ELEVATOR_CALL_BUTTON
 WAIT_ELEVATOR_OPEN
 ENTER_ELEVATOR
-ALIGN_INSIDE_ELEVATOR_TAG
 PRESS_5F_BUTTON
 WAIT_5F
-SWITCH_5F_MAP
 EXIT_ELEVATOR
+SWITCH_5F_MAP
 GO_TO_TARGET_PLACE
 ARM_TASK_AT_TARGET
 RETURN_TO_ELEVATOR
+ALIGN_ELEVATOR_TAG_RETURN
+PRESS_ELEVATOR_CALL_BUTTON_RETURN
+WAIT_ELEVATOR_OPEN_RETURN
+ENTER_ELEVATOR_RETURN
 PRESS_4F_BUTTON
 WAIT_4F
+EXIT_ELEVATOR_RETURN
 SWITCH_4F_MAP
 RETURN_HOME
 DONE
@@ -88,22 +94,24 @@ mission_manager
   -> VicPinky Nav2 / controller
 ```
 
-목표 좌표는 `mission_manager/config/locations.yaml`의 각 location에 `pose`로 넣는다.
+목표 좌표는 `mission_manager/config/locations.yaml`의 `points`에 넣는다.
+`MissionFlowLoader`가 `home`, `room_402`, `elevator_front_4f` 같은
+미션 location 이름을 좌표로 확장한다. `/nav/go_to`의 `target_name`은
+주행팀 `nav_points.yaml` 키에 맞춰 `home`, `402`, `elevator_front`처럼
+전달하고, 같은 좌표는 `extra_json.pose`에도 함께 넣는다.
 
 ```yaml
-locations:
-  room_402:
-    floor: 4
-    marker_id: -1
-    type: navigation_goal
-    pose:
+points:
+  "4":
+    "402":
       frame_id: map
-      x: 0.0
-      y: 0.0
+      x: 2.998
+      y: -12.433
       yaw: 0.0
 ```
 
-`yaw`는 radian이다. 위 `x`, `y`, `yaw`는 예시값이므로 주행팀 SLAM map 기준 실제 좌표로 채워야 한다.
+`yaw`는 radian이다. marker/button/map 작업처럼 좌표가 없는 대상은 같은 파일의
+`locations`에 `marker_id`와 `extra`만 둔다.
 
 ### Arm CAN Bridge
 
@@ -488,14 +496,17 @@ ros2 launch vicpinky_nav_adapter nav_adapter.launch.py
 
 ### `Navigation goal has no pose`
 
-`locations.yaml`의 해당 location에 `pose`가 없는 상태다. 실제 맵 좌표를 아래 형식으로 추가한다.
+`locations.yaml`의 `points`에 해당 좌표가 없거나 location alias가 잘못된 상태다.
+실제 맵 좌표를 층별 `points`에 추가한다.
 
 ```yaml
-pose:
-  frame_id: map
-  x: 1.20
-  y: 0.50
-  yaw: 0.0
+points:
+  "4":
+    "402":
+      frame_id: map
+      x: 2.998
+      y: -12.433
+      yaw: 0.0
 ```
 
 ### `Nav2 NavigateToPose action server is not available`

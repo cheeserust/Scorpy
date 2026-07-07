@@ -134,7 +134,7 @@ Cancel: 중간 취소
 ```yaml
 - state: GO_TO_ELEVATOR_FRONT
   task: go_to
-  target: elevator_front_4f
+  target: elevator_front
   location: elevator_front_4f
 
 - state: WAIT_5F
@@ -165,7 +165,9 @@ mission_manager
   -> VicPinky Nav2
 ```
 
-`vicpinky_nav_adapter`는 `RunTask.Goal.extra_json` 안의 `pose` 또는 `locations.yaml`에서 resolved된 pose를 `PoseStamped`로 바꾼다. `yaw`는 quaternion으로 변환된다.
+`vicpinky_nav_adapter`는 `MissionFlowLoader`가 `locations.yaml`의 `points`에서
+풀어 넣은 `RunTask.Goal.extra_json.pose`를 `PoseStamped`로 바꾼다.
+`yaw`는 quaternion으로 변환된다.
 
 ### 4.3 팔 CAN 흐름
 
@@ -271,7 +273,7 @@ Result:
 | `resource/mission_manager` | ament index에서 패키지를 찾기 위한 marker 파일. |
 | `launch/mission_manager.launch.py` | mission manager 노드 실행 launch. config 파일 경로를 parameter로 넘긴다. |
 | `config/mission_flow.yaml` | 미션 step 순서 정의. 이 파일을 바꾸면 미션 절차가 바뀐다. |
-| `config/locations.yaml` | pickup, delivery, elevator marker 같은 장소 정보. floor, marker_id, pose를 담는다. |
+| `config/locations.yaml` | 주행팀 map 좌표 `points`와 elevator marker/map 같은 location metadata를 담는다. |
 | `config/action_servers.yaml` | task 이름을 실제 action server 이름, timeout, retry로 매핑한다. |
 | `test/` | flake8, pep257, copyright 테스트. 현재 일부 스타일 이슈가 남아 있을 수 있다. |
 
@@ -1183,7 +1185,8 @@ CAN은 UART처럼 TX/RX를 교차하지 않는다. 같은 버스에 `CAN_H`, `CA
 
 ### Q. 장소나 marker id는 어디서 바꿔?
 
-`mission_manager/config/locations.yaml`에서 바꾼다. 주행 좌표는 `pose`에, marker 기반 작업은 `marker_id`에 둔다.
+`mission_manager/config/locations.yaml`에서 바꾼다. 주행 좌표는 `points`에
+층별로 두고, marker 기반 작업은 `locations`의 `marker_id`에 둔다.
 
 ### Q. 엘리베이터 FSM은 어디에 반영됐어?
 

@@ -110,6 +110,10 @@ arm_can_bridge:
     # JointTrajectoryPoint.effort[]에 load가 있으면 goal별 값이 이 기본값보다 우선한다.
     gripper_target_load_raw: 500
 
+    # Board3는 9개 servo command frame을 연속 수신해 하나의 gripper 목표로 staging한다.
+    # 실제 STM32/servo 통신 여유를 위해 0x103 frame 사이에 작은 gap을 둔다.
+    board3_inter_frame_delay_ms: 3.0
+
     # 0x201/0x202/0x203 상태가 이 시간보다 오래 들어오지 않으면 연결 이상으로 본다.
     status_timeout_ms: 500
 
