@@ -3,6 +3,7 @@
 import time
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Int32
@@ -17,7 +18,7 @@ class FloorCheckServer(Node):
         self.declare_parameter('mock_mode', True)
         self.declare_parameter('mock_delay_sec', 2.0)
         self.declare_parameter('tag_topic', '/tag/floor_id')
-        self.declare_parameter('timeout_sec', 20.0)
+        self.declare_parameter('timeout_sec', 120.0)
 
         self.server_name = self.get_parameter('server_name').value
         self.mock_mode = bool(self.get_parameter('mock_mode').value)
@@ -25,8 +26,11 @@ class FloorCheckServer(Node):
         self.tag_topic = self.get_parameter('tag_topic').value
         self.timeout_sec = float(self.get_parameter('timeout_sec').value)
 
+        self.cb_group = ReentrantCallbackGroup()
+
         self.current_floor = None
-        self.create_subscription(Int32, self.tag_topic, self.tag_callback, 10)
+        self.create_subscription(Int32, self.tag_topic, self.tag_callback, 10,
+                                 callback_group=self.cb_group)
 
         self.action_server = ActionServer(
             self,
@@ -35,6 +39,7 @@ class FloorCheckServer(Node):
             execute_callback=self.execute_callback,
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
+            callback_group=self.cb_group,
         )
 
         self.get_logger().info('Floor Check Action Server Started.')

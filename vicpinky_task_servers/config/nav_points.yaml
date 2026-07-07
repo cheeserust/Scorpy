@@ -28,7 +28,13 @@ points:
       frame_id: map
       x: 2.998
       y: -12.433
-      yaw: 1.667
+      yaw: 0
+
+    "402_return_test":
+      frame_id: map
+      x: 0.0
+      y: -12.0
+      yaw: 3.14
 
   "5":
     dock:

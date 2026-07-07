@@ -4,6 +4,7 @@ import time
 import math
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -34,8 +35,11 @@ class ElevatorDoorServer(Node):
         self.angle_max = float(self.get_parameter('angle_max').value)
         self.timeout_sec = float(self.get_parameter('timeout_sec').value)
 
+        self.cb_group = ReentrantCallbackGroup()
+
         self.latest_scan = None
-        self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
+        self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10,
+                                 callback_group=self.cb_group)
 
         self.action_server = ActionServer(
             self,
@@ -44,6 +48,7 @@ class ElevatorDoorServer(Node):
             execute_callback=self.execute_callback,
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
+            callback_group=self.cb_group,
         )
 
         self.get_logger().info('Elevator Door Action Server Started.')
