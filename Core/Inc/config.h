@@ -41,7 +41,11 @@
 #define TRAJECTORY_POINT_QUEUE_SIZE (TRAJECTORY_QUEUE_SIZE / BOARD_STAGING_FRAME_COUNT)
 #define MULTI_AXIS_QUEUE_SIZE    TRAJECTORY_POINT_QUEUE_SIZE
 #define STAGING_TIMEOUT_MS       100
-#define MIN_STEP_INTERVAL_TICKS 9-1 //(100rpm)
+#define MIN_STEP_INTERVAL_TICKS (9 - 1) //(100rpm)
+
+/* HOME과 비슷한 안전 속도 제한. 목표각 명령 duration이 너무 짧으면
+ * stepper_prepare_motion()에서 이 step/s를 넘지 않도록 duration을 늘린다. */
+#define MOTION_MAX_STEP_RATE_SPS 1000u
 
 
 #define CAN_ID_ESTOP             0x001

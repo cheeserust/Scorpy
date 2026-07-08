@@ -210,20 +210,33 @@ static void step_pin_low(uint8_t id)
 
 void stepper_prepare_motion(uint16_t duration_ms)
 {
-    total_move_ticks = (uint32_t)duration_ms * 100;
-    if (total_move_ticks == 0) total_move_ticks = 1;
+    uint32_t limited_duration_ms = duration_ms;
+
+    if (limited_duration_ms == 0) limited_duration_ms = 1;
 
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         axis_dda_accumulator[i] = 0;
         step_wait_10us[i] = 0;
 
-        // ★ [연산 밀어내기 핵심] 10us 인터럽트 내부에서 하던 거리 계산을 이리로 이사
         if (g_target_step[i] >= g_motion_start_step[i]) {
             g_axis_total_steps[i] = (uint32_t)(g_target_step[i] - g_motion_start_step[i]);
         } else {
             g_axis_total_steps[i] = (uint32_t)(g_motion_start_step[i] - g_target_step[i]);
         }
+
+        if (g_axis_total_steps[i] > 0 && MOTION_MAX_STEP_RATE_SPS > 0) {
+            uint32_t required_ms;
+
+            required_ms = (g_axis_total_steps[i] * 1000u + MOTION_MAX_STEP_RATE_SPS - 1u) /
+                          MOTION_MAX_STEP_RATE_SPS;
+            if (required_ms > limited_duration_ms) {
+                limited_duration_ms = required_ms;
+            }
+        }
     }
+
+    total_move_ticks = limited_duration_ms * 100u;
+    if (total_move_ticks == 0) total_move_ticks = 1;
 }
 
 void stepper_cancel_motion(void)
