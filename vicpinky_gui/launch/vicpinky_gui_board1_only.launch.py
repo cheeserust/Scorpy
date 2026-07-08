@@ -1,4 +1,4 @@
-"""Launch the VicPinky browser control dashboard."""
+"""Launch the VicPinky dashboard for Board1-only base + 3-axis arm testing."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -8,14 +8,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    """Create the launch description."""
+    """Create the Board1-only 4-axis GUI launch description."""
     host = LaunchConfiguration('host')
     port = LaunchConfiguration('port')
     auto_port = LaunchConfiguration('auto_port')
     port_search_limit = LaunchConfiguration('port_search_limit')
-    manual_arm_mode = LaunchConfiguration('manual_arm_mode')
-    enable_manual_arm = LaunchConfiguration('enable_manual_arm')
-    enable_manual_gripper = LaunchConfiguration('enable_manual_gripper')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -38,21 +35,6 @@ def generate_launch_description():
             default_value='20',
             description='Number of consecutive ports to try when auto_port is true',
         ),
-        DeclareLaunchArgument(
-            'manual_arm_mode',
-            default_value='full',
-            description='Manual arm joint set: full, board1, or board2.',
-        ),
-        DeclareLaunchArgument(
-            'enable_manual_arm',
-            default_value='true',
-            description='Show and enable manual arm controls.',
-        ),
-        DeclareLaunchArgument(
-            'enable_manual_gripper',
-            default_value='true',
-            description='Show and enable manual gripper controls.',
-        ),
         Node(
             package='vicpinky_gui',
             executable='vicpinky_gui_node',
@@ -66,15 +48,9 @@ def generate_launch_description():
                     port_search_limit,
                     value_type=int,
                 ),
-                'manual_arm_mode': manual_arm_mode,
-                'enable_manual_arm': ParameterValue(
-                    enable_manual_arm,
-                    value_type=bool,
-                ),
-                'enable_manual_gripper': ParameterValue(
-                    enable_manual_gripper,
-                    value_type=bool,
-                ),
+                'manual_arm_mode': 'board1',
+                'enable_manual_arm': True,
+                'enable_manual_gripper': False,
             }],
         ),
     ])

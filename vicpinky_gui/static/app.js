@@ -6,33 +6,33 @@ const state = {
   manualInitialized: { arm: false, gripper: false },
   manualSending: { arm: false, gripper: false },
   lastJointState: null,
+  locations: [],
+  directNavLocations: [],
+  navSending: false,
 };
 
 const elevatorFsmStates = [
-  "PICK_OBJECT_AT_START",
-  "GO_TO_ELEVATOR_FRONT_4F",
-  "ALIGN_ELEVATOR_TAG_4F",
-  "PRESS_ELEVATOR_CALL_BUTTON_4F",
-  "WAIT_ELEVATOR_OPEN_4F",
-  "ENTER_ELEVATOR_4F",
-  "ALIGN_INSIDE_ELEVATOR_TAG_TO_5F",
+  "GO_TO_ELEVATOR_FRONT",
+  "ALIGN_ELEVATOR_TAG",
+  "PRESS_ELEVATOR_CALL_BUTTON",
+  "WAIT_ELEVATOR_OPEN",
+  "ENTER_ELEVATOR",
   "PRESS_5F_BUTTON",
   "WAIT_5F",
+  "EXIT_ELEVATOR",
   "SWITCH_5F_MAP",
-  "EXIT_ELEVATOR_5F",
-  "GO_TO_DELIVERY_LOCATION",
-  "PLACE_OBJECT_AT_DELIVERY",
-  "RETURN_TO_ELEVATOR_5F",
-  "ALIGN_ELEVATOR_TAG_5F",
-  "PRESS_ELEVATOR_CALL_BUTTON_5F",
-  "WAIT_ELEVATOR_OPEN_5F",
-  "ENTER_ELEVATOR_5F",
-  "ALIGN_INSIDE_ELEVATOR_TAG_TO_4F",
+  "GO_TO_TARGET_PLACE",
+  "ARM_TASK_AT_TARGET",
+  "RETURN_TO_ELEVATOR",
+  "ALIGN_ELEVATOR_TAG_RETURN",
+  "PRESS_ELEVATOR_CALL_BUTTON_RETURN",
+  "WAIT_ELEVATOR_OPEN_RETURN",
+  "ENTER_ELEVATOR_RETURN",
   "PRESS_4F_BUTTON",
   "WAIT_4F",
+  "EXIT_ELEVATOR_RETURN",
   "SWITCH_4F_MAP",
-  "EXIT_ELEVATOR_4F",
-  "RETURN_TO_START",
+  "RETURN_HOME",
   "DONE",
 ];
 
@@ -117,15 +117,19 @@ const setOverviewCard = (cardId, className) => {
 
 const manualDom = {
   arm: {
+    section: "manualArmSection",
     grid: "armManualControls",
     duration: "manualArmDuration",
     send: "sendArmManualButton",
+    current: "useCurrentArmButton",
     meta: "manualArmMeta",
   },
   gripper: {
+    section: "manualGripperSection",
     grid: "gripperManualControls",
     duration: "manualGripperDuration",
     send: "sendGripperManualButton",
+    current: "useCurrentGripperButton",
     meta: "manualGripperMeta",
   },
 };
@@ -134,23 +138,30 @@ const applyConfig = (config) => {
   if (state.configApplied || !config) return;
 
   const locations = Array.isArray(config.locations) ? config.locations : [];
+  const directNavLocations = Array.isArray(config.direct_nav_locations)
+    ? config.direct_nav_locations
+    : [];
+  const missionLocations = Array.isArray(config.mission_locations)
+    ? config.mission_locations
+    : [];
   const defaults = config.default_goal || {};
+  const navDefaults = config.default_nav || {};
   const pickup = $("pickupLocation");
   const delivery = $("deliveryLocation");
+  state.locations = locations;
+  state.directNavLocations = directNavLocations;
 
-  const options = locations.length
-    ? locations
+  const options = missionLocations.length
+    ? missionLocations
     : [
-        { name: defaults.pickup_location || "object" },
+        { name: defaults.pickup_location || "home" },
         { name: defaults.delivery_location || "object_place" },
       ];
 
   for (const select of [pickup, delivery]) {
     select.innerHTML = options
       .map((location) => {
-        const label = location.type
-          ? `${location.name} (${location.type})`
-          : location.name;
+        const label = location.label || location.name;
         return `<option value="${escapeHtml(location.name)}">${escapeHtml(label)}</option>`;
       })
       .join("");
@@ -159,12 +170,58 @@ const applyConfig = (config) => {
   $("missionId").value = defaults.mission_id || "";
   $("objectLabel").value = defaults.object_label || "box";
   $("targetFloor").value = defaults.target_floor ?? 5;
-  pickup.value = defaults.pickup_location || "object";
+  pickup.value = defaults.pickup_location || "home";
   delivery.value = defaults.delivery_location || "object_place";
+  renderNavFloorOptions(navDefaults.target_floor ?? 4);
+  renderNavLocationOptions(
+    navDefaults.location_id || navDefaults.location_name || "4:home",
+  );
 
   renderFlow(config.mission_steps || []);
   renderManualControls(config.manual || {});
   state.configApplied = true;
+};
+
+const numericFloors = (locations) => {
+  const floors = locations
+    .map((location) => Number(location.floor))
+    .filter((floor) => Number.isInteger(floor));
+  return [...new Set(floors)].sort((left, right) => left - right);
+};
+
+const renderNavFloorOptions = (preferredFloor) => {
+  const floors = numericFloors(state.directNavLocations);
+  const options = floors.length ? floors : [4, 5];
+  $("navFloor").innerHTML = options
+    .map((floor) => `<option value="${escapeHtml(floor)}">${escapeHtml(floor)}F</option>`)
+    .join("");
+  const safeFloor = options.includes(Number(preferredFloor))
+    ? Number(preferredFloor)
+    : options[0];
+  $("navFloor").value = String(safeFloor);
+};
+
+const renderNavLocationOptions = (preferredLocation = "") => {
+  const floor = Number($("navFloor").value);
+  const candidates = state.directNavLocations.filter((location) => {
+    const locationFloor = Number(location.floor);
+    return Number.isInteger(locationFloor) && locationFloor === floor;
+  });
+  const options = candidates.length ? candidates : state.directNavLocations;
+  const previous = preferredLocation || $("navLocation").value;
+
+  $("navLocation").innerHTML = options
+    .map((location) => {
+      const labelParts = [location.name];
+      if (location.type) labelParts.push(location.type);
+      return `<option value="${escapeHtml(location.id)}">${escapeHtml(labelParts.join(" | "))}</option>`;
+    })
+    .join("");
+
+  const ids = options.map((location) => location.id);
+  if (ids.includes(previous)) {
+    $("navLocation").value = previous;
+  }
 };
 
 const renderFlow = (steps) => {
@@ -195,14 +252,31 @@ const renderManualControls = (manualConfig) => {
 
   const armConfig = state.manualConfigs.arm || {};
   const gripperConfig = state.manualConfigs.gripper || {};
-  $("manualArmDuration").value = armConfig.default_duration_sec ?? 2.0;
-  $("manualGripperDuration").value = gripperConfig.default_duration_sec ?? 1.0;
-  $("manualGripperLoad").value = gripperConfig.default_target_load_raw ?? 500;
+  if (state.manualConfigs.arm) {
+    $("manualArmDuration").value = armConfig.default_duration_sec ?? 2.0;
+  }
+  if (state.manualConfigs.gripper) {
+    $("manualGripperDuration").value = gripperConfig.default_duration_sec ?? 1.0;
+    $("manualGripperLoad").value = gripperConfig.default_target_load_raw ?? 500;
+  }
 };
 
 const renderManualControllerControls = (controller) => {
   const config = state.manualConfigs[controller];
   const dom = manualDom[controller];
+  const configured = Boolean(config);
+  $(dom.section).hidden = !configured;
+  $(dom.duration).disabled = !configured;
+  $(dom.send).disabled = !configured;
+  $(dom.current).disabled = !configured;
+  if (controller === "gripper") {
+    $("manualGripperLoad").disabled = !configured;
+  }
+
+  if (!configured) {
+    return;
+  }
+
   const grid = $(dom.grid);
   const joints = Array.isArray(config?.joints) ? config.joints : [];
 
@@ -331,18 +405,30 @@ const renderManualStatus = (manual) => {
   const missionActive = Boolean(manual?.mission_active);
   const arm = controllers.arm || {};
   const gripper = controllers.gripper || {};
+  const armConfigured = Boolean(state.manualConfigs.arm);
+  const gripperConfigured = Boolean(state.manualConfigs.gripper);
   const armReady = Boolean(arm.ready);
   const gripperReady = Boolean(gripper.ready);
-  const anyActive = Boolean(arm.active || gripper.active);
-  const allReady = armReady && gripperReady;
+  const anyActive = Boolean(
+    (armConfigured && arm.active) ||
+    (gripperConfigured && gripper.active)
+  );
+  const configuredReady = [];
+  if (armConfigured) configuredReady.push(armReady);
+  if (gripperConfigured) configuredReady.push(gripperReady);
+  const allReady = configuredReady.length > 0 && configuredReady.every(Boolean);
 
-  $("manualArmMeta").textContent = `${armReady ? "Ready" : "Offline"} | ${arm.active ? "Moving" : "Idle"}`;
-  $("manualGripperMeta").textContent = `${gripperReady ? "Ready" : "Offline"} | ${gripper.active ? "Moving" : "Idle"}`;
+  if (armConfigured) {
+    $("manualArmMeta").textContent = `${armReady ? "Ready" : "Offline"} | ${arm.active ? "Moving" : "Idle"}`;
+  }
+  if (gripperConfigured) {
+    $("manualGripperMeta").textContent = `${gripperReady ? "Ready" : "Offline"} | ${gripper.active ? "Moving" : "Idle"}`;
+  }
 
   $("sendArmManualButton").disabled =
-    missionActive || !armReady || arm.active || state.manualSending.arm;
+    !armConfigured || missionActive || !armReady || arm.active || state.manualSending.arm;
   $("sendGripperManualButton").disabled =
-    missionActive || !gripperReady || gripper.active || state.manualSending.gripper;
+    !gripperConfigured || missionActive || !gripperReady || gripper.active || state.manualSending.gripper;
 
   if (missionActive) {
     $("manualReady").textContent = "Mission";
@@ -371,11 +457,12 @@ const renderManualStatus = (manual) => {
     `${last.controller || "manual"} ${last.state || "-"} | ${formatDuration(last.duration_sec)}${result ? ` | ${result}` : ""}`;
 };
 
-const renderMission = (mission) => {
+const renderMission = (mission, directNav) => {
   const status = mission.status;
   const feedback = mission.feedback;
   const result = mission.result;
   const goal = mission.goal;
+  const directNavActive = Boolean(directNav?.active);
 
   $("missionReady").textContent = mission.action_ready ? "Ready" : "Offline";
   $("missionReady").className = `status-chip ${mission.action_ready ? "success" : "danger"}`;
@@ -406,7 +493,8 @@ const renderMission = (mission) => {
     : "-";
   renderElevatorFsm(status, feedback);
 
-  $("startMissionButton").disabled = !mission.action_ready || mission.active;
+  $("startMissionButton").disabled =
+    !mission.action_ready || mission.active || directNavActive;
   $("cancelMissionButton").disabled = !mission.active;
 
   const missionHealth = status?.error || result?.success === false
@@ -422,6 +510,44 @@ const renderMission = (mission) => {
     status?.active_task || feedback?.current_task || "-";
   $("overviewTaskMeta").textContent =
     status?.message || feedback?.detail || result?.message || "No active task";
+};
+
+const renderDirectNav = (directNav, mission) => {
+  const ready = Boolean(directNav?.action_ready);
+  const active = Boolean(directNav?.active);
+  const missionActive = Boolean(mission?.active);
+  const goal = directNav?.goal;
+  const feedback = directNav?.feedback;
+  const result = directNav?.result;
+
+  $("navReady").textContent = ready ? "Ready" : "Offline";
+  $("navReady").className = `status-chip ${ready ? "success" : "danger"}`;
+
+  const stateText =
+    goal?.state ||
+    result?.status ||
+    (active ? "ACTIVE" : "IDLE");
+  $("navState").textContent =
+    `${stateText} | ${active ? "moving" : "idle"}`;
+
+  const targetText = goal
+    ? `${goal.location_name} -> ${goal.target_name} (${goal.target_floor}F)`
+    : "-";
+  $("navTarget").textContent = targetText;
+
+  const progress = Number(feedback?.progress);
+  $("navFeedback").textContent = feedback
+    ? `${feedback.phase || "-"} | ${Number.isFinite(progress) ? `${Math.round(progress * 100)}%` : "-"} | ${feedback.detail || ""}`
+    : "-";
+
+  $("navResult").textContent = result
+    ? `${result.status}: ${result.message}`
+    : "-";
+
+  const hasLocation = Boolean($("navLocation").value);
+  $("startNavButton").disabled =
+    !ready || active || missionActive || state.navSending || !hasLocation;
+  $("cancelNavButton").disabled = !active;
 };
 
 const renderRobotConnection = (connection) => {
@@ -694,7 +820,8 @@ const renderSnapshot = (snapshot) => {
   state.lastJointState = snapshot.joints.state;
   syncManualDefaultsFromJoints();
   renderRobotConnection(snapshot.robot_connection);
-  renderMission(snapshot.mission);
+  renderMission(snapshot.mission, snapshot.direct_nav);
+  renderDirectNav(snapshot.direct_nav, snapshot.mission);
   renderManualStatus(snapshot.manual);
   renderBoards(snapshot.arm);
   renderJoints(snapshot.joints);
@@ -734,6 +861,8 @@ const postArmCommand = async (command) => {
 
 const readManualPositions = (controller) => {
   const config = state.manualConfigs[controller];
+  if (!config) return {};
+
   const joints = Array.isArray(config?.joints) ? config.joints : [];
   const positions = {};
 
@@ -748,6 +877,8 @@ const readManualPositions = (controller) => {
 };
 
 const sendManual = async (controller) => {
+  if (!state.manualConfigs[controller]) return;
+
   const dom = manualDom[controller];
   const payload = {
     positions_deg: readManualPositions(controller),
@@ -777,6 +908,8 @@ const sendManual = async (controller) => {
 };
 
 const useCurrentManual = (controller) => {
+  if (!state.manualConfigs[controller]) return;
+
   if (applyManualCurrent(controller, true)) {
     state.manualInitialized[controller] = true;
     state.manualDirty[controller] = false;
@@ -817,9 +950,51 @@ const cancelMission = async () => {
   }
 };
 
+const startDirectNav = async (event) => {
+  event.preventDefault();
+  const selected = state.directNavLocations.find(
+    (location) => location.id === $("navLocation").value,
+  );
+  const payload = {
+    location_id: $("navLocation").value,
+    location_name: selected?.name || "",
+    target_floor: Number($("navFloor").value),
+  };
+
+  state.navSending = true;
+  $("startNavButton").disabled = true;
+
+  try {
+    await api("/api/nav/go-to", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await poll();
+  } catch (error) {
+    $("navState").textContent = error.message;
+    setConnection(error.message, "offline");
+  } finally {
+    state.navSending = false;
+    await poll();
+  }
+};
+
+const cancelDirectNav = async () => {
+  try {
+    await api("/api/nav/cancel", { method: "POST", body: "{}" });
+    await poll();
+  } catch (error) {
+    $("navState").textContent = error.message;
+    setConnection(error.message, "offline");
+  }
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   $("missionForm").addEventListener("submit", startMission);
   $("cancelMissionButton").addEventListener("click", cancelMission);
+  $("navForm").addEventListener("submit", startDirectNav);
+  $("cancelNavButton").addEventListener("click", cancelDirectNav);
+  $("navFloor").addEventListener("change", () => renderNavLocationOptions());
   $("statusButton").addEventListener("click", () => postArmCommand("status"));
   $("estopTopButton").addEventListener("click", () => postArmCommand("estop"));
   $("sendArmManualButton").addEventListener("click", () => sendManual("arm"));

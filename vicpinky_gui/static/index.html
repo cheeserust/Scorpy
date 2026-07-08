@@ -119,6 +119,50 @@
         </dl>
       </section>
 
+      <section class="panel nav-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Direct Drive</h2>
+            <div id="navState" class="meta-line">No direct navigation</div>
+          </div>
+          <div id="navReady" class="status-chip neutral">Action</div>
+        </div>
+
+        <form id="navForm" class="nav-form">
+          <label>
+            Current Floor
+            <select id="navFloor" name="target_floor"></select>
+          </label>
+          <label>
+            Saved Point
+            <select id="navLocation" name="location_name"></select>
+          </label>
+          <div class="nav-actions">
+            <button id="startNavButton" class="primary-button" type="submit">
+              Go
+            </button>
+            <button id="cancelNavButton" class="secondary-button" type="button">
+              Cancel
+            </button>
+          </div>
+        </form>
+
+        <dl class="status-list compact-status">
+          <div>
+            <dt>Target</dt>
+            <dd id="navTarget">-</dd>
+          </div>
+          <div>
+            <dt>Feedback</dt>
+            <dd id="navFeedback">-</dd>
+          </div>
+          <div>
+            <dt>Result</dt>
+            <dd id="navResult">-</dd>
+          </div>
+        </dl>
+      </section>
+
       <section class="panel link-panel">
         <div class="panel-heading">
           <div>
@@ -193,7 +237,7 @@
         </div>
 
         <div class="manual-layout">
-          <div class="manual-section">
+          <div id="manualArmSection" class="manual-section">
             <div class="manual-section-heading">
               <div>
                 <h3>Arm</h3>
@@ -215,7 +259,7 @@
             </div>
           </div>
 
-          <div class="manual-section">
+          <div id="manualGripperSection" class="manual-section">
             <div class="manual-section-heading">
               <div>
                 <h3>Gripper</h3>

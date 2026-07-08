@@ -1,0 +1,232 @@
+points:
+  # 주행팀 SLAM map 기준 좌표. yaw 단위는 radian이다.
+  "4":
+    dock:
+      frame_id: map
+      x: 2.98
+      y: -14.10
+      yaw: -3.04
+
+    home:
+      frame_id: map
+      x: 2.98
+      y: -14.10
+      yaw: -3.04
+
+    elevator_front:
+      frame_id: map
+      x: 0.470
+      y: -0.455
+      yaw: 1.983
+
+    "401":
+      frame_id: map
+      x: -0.535
+      y: -10.839
+      yaw: 0.0
+
+    "402":
+      frame_id: map
+      x: 2.998
+      y: -12.433
+      yaw: 0.0
+
+    "402_return_test":
+      frame_id: map
+      x: 0.0
+      y: -12.0
+      yaw: 3.14
+
+  "5":
+    dock:
+      frame_id: map
+      x: -0.226
+      y: -0.154
+      yaw: 0.0
+
+    elevator_front:
+      frame_id: map
+      x: 15.771
+      y: 2.634
+      yaw: 0.0
+
+    "501":
+      frame_id: map
+      x: 6.318
+      y: 1.524
+      yaw: 0.0
+
+    object_place:
+      frame_id: map
+      x: 6.318
+      y: 1.524
+      yaw: 0.0
+
+locations:
+  # Legacy aliases that are still convenient for mission goals.
+  dock:
+    floor: 4
+    point: dock
+    marker_id: -1
+    type: dock
+
+  object:
+    floor: 4
+    point: "402"
+    marker_id: -1
+    type: pickup_zone
+
+  pickup_zone:
+    floor: 4
+    point: "402"
+    marker_id: -1
+    type: pickup_zone
+
+  delivery_zone:
+    floor: "$target_floor"
+    marker_id: -1
+    type: delivery_zone
+
+  # Marker/button/map tasks do not own global map coordinates.
+  elevator_panel_4f:
+    floor: 4
+    marker_id: 20
+    type: docking_target
+
+  elevator_call_button_4f:
+    floor: 4
+    marker_id: 20
+    type: button_target
+
+  elevator_door_4f:
+    floor: 4
+    marker_id: -1
+    type: elevator_door
+
+  door_center_4f:
+    floor: 4
+    marker_id: 10
+    type: docking_target
+
+  inside_elevator_4f:
+    floor: 4
+    marker_id: 10
+    type: elevator_inside
+    extra:
+      tag_pose_topic: /tag_pose
+      cmd_vel_topic: /cmd_vel
+      localization_mode: aruco_odom
+
+  elevator_inside_panel:
+    floor: "$target_floor"
+    marker_id: -1
+    type: docking_target
+    extra:
+      tag_pose_topic: /tag_pose
+      cmd_vel_topic: /cmd_vel
+      localization_mode: aruco_odom
+
+  elevator_button_5f:
+    floor: 4
+    marker_id: -1
+    type: button_target
+    extra:
+      button_floor: 5
+
+  floor_4_marker:
+    floor: 4
+    marker_id: 4
+    type: floor_marker
+    extra:
+      expected_floor: 4
+      floor_topic: /tag/floor_id
+
+  map_4f:
+    floor: 4
+    marker_id: -1
+    type: map_switch
+    extra:
+      map_name: 4F
+      map_yaml: 4F.yaml
+      initial_pose_location: elevator_front_4f
+
+  elevator_panel_5f:
+    floor: 5
+    marker_id: 20
+    type: docking_target
+
+  elevator_call_button_5f:
+    floor: 5
+    marker_id: 20
+    type: button_target
+
+  elevator_door_5f:
+    floor: 5
+    marker_id: -1
+    type: elevator_door
+
+  door_center_5f:
+    floor: 5
+    marker_id: 10
+    type: docking_target
+
+  inside_elevator_5f:
+    floor: 5
+    marker_id: 10
+    type: elevator_inside
+    extra:
+      tag_pose_topic: /tag_pose
+      cmd_vel_topic: /cmd_vel
+      localization_mode: aruco_odom
+
+  elevator_button_4f:
+    floor: 5
+    marker_id: -1
+    type: button_target
+    extra:
+      button_floor: 4
+
+  floor_5_marker:
+    floor: 5
+    marker_id: 5
+    type: floor_marker
+    extra:
+      expected_floor: 5
+      floor_topic: /tag/floor_id
+
+  map_5f:
+    floor: 5
+    marker_id: -1
+    type: map_switch
+    extra:
+      map_name: 5F
+      map_yaml: 5F.yaml
+      initial_pose_location: elevator_front_5f
+
+  target_floor_exit:
+    floor: "$target_floor"
+    type: navigation_goal
+    marker_id_by_floor:
+      4: 4
+      5: 5
+
+  target_floor_marker:
+    floor: "$target_floor"
+    type: floor_marker
+    marker_id_by_floor:
+      4: 4
+      5: 5
+
+  pickup_floor_exit:
+    floor: "$pickup_floor"
+    type: navigation_goal
+    marker_id_by_floor:
+      4: 4
+      5: 5
+
+  pickup_floor_marker:
+    floor: "$pickup_floor"
+    type: floor_marker
+    marker_id_by_floor:
+      4: 4
+      5: 5
