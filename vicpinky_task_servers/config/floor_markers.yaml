@@ -6,18 +6,18 @@ markers:
 
     # 좌표 수정 필요, 실제 엘리베이터 앞 의 좌표를 넣어야 함
     initial_pose:
-      x: -3.267
-      y: -21.843
-      yaw: 0
+      x: 1.20
+      y: -0.051
+      yaw: -1.46
 
   5:
     type: "landing"
     floor_number: 5
     map_yaml: "maps/5f.yaml"
     initial_pose:
-      x: -2.411
-      y: -1.390
-      yaw: 0
+      x: 15.77
+      y: 1.09
+      yaw: -3.0614
   
   10:
     type: "elevator_interior"

@@ -45,8 +45,8 @@ points:
 
     elevator_front:
       frame_id: map
-      x: 15.771
-      y: 2.634
+      x: 14.93
+      y: 1.90
       yaw: 0.0
 
     "501":
@@ -57,6 +57,6 @@ points:
 
     object_place:
       frame_id: map
-      x: 6.318
-      y: 1.524
-      yaw: 0.0
+      x: 2.84
+      y: 1.17
+      yaw: 0.109

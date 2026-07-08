@@ -19,6 +19,8 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav2_msgs.srv import LoadMap
 from std_msgs.msg import Int32
 
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+
 from vicpinky_interfaces.action import RunTask
 
 PKG = 'vicpinky_task_servers'
@@ -33,9 +35,17 @@ class MapSwitcher(Node):
         # 단독 테스트용: /tag/floor_id 수신 시 자동 전환 (미션 매니저 사용 시 False 유지)
         self.declare_parameter('enable_topic_trigger', False)
 
+        self.declare_parameter('amcl_converge_timeout_sec', 10.0)
+        self.declare_parameter('converge_tol_xy', 0.5)
+        self.declare_parameter('costmap_settle_sec', 1.5)
+
         self.server_name = self.get_parameter('server_name').value
         self.load_map_timeout_sec = float(self.get_parameter('load_map_timeout_sec').value)
         self.enable_topic_trigger = bool(self.get_parameter('enable_topic_trigger').value)
+
+        self.amcl_converge_timeout_sec = float(self.get_parameter('amcl_converge_timeout_sec').value)
+        self.converge_tol_xy = float(self.get_parameter('converge_tol_xy').value)
+        self.costmap_settle_sec = float(self.get_parameter('costmap_settle_sec').value)
 
         self.cb_group = ReentrantCallbackGroup()
 
@@ -43,6 +53,14 @@ class MapSwitcher(Node):
             LoadMap, '/map_server/load_map', callback_group=self.cb_group)
         self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
 
+        self.latest_amcl = None  # (x, y, stamp_time)
+        amcl_qos = QoSProfile(depth=1,
+                              reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self.on_amcl_pose,
+            amcl_qos, callback_group=self.cb_group)
+        
         share_dir = get_package_share_directory(PKG)
         config_path = os.path.join(share_dir, 'config', 'floor_markers.yaml')
         self.marker_table = self.load_marker_table(config_path, share_dir)
@@ -135,10 +153,50 @@ class MapSwitcher(Node):
         fb.progress = 0.8
         fb.detail = f'x={x:.2f} y={y:.2f} yaw={yaw:.2f}'
         goal_handle.publish_feedback(fb)
-        self.publish_initialpose(x, y, yaw)
+        # AMCL 수렴 대기: /amcl_pose가 seed 근처로 올 때까지 1초마다 재발행
+        fb.phase = 'WAIT_AMCL'
+        fb.progress = 0.85
+        self.latest_amcl = None
+        gate_start = time.time()
+        last_pub = 0.0
+        converged = False
+        while rclpy.ok():
+            if goal_handle.is_cancel_requested:
+                result.success = False
+                result.message = 'map switch canceled'
+                goal_handle.canceled()
+                return result
+            if time.time() - gate_start > self.amcl_converge_timeout_sec:
+                break
+            if time.time() - last_pub >= 1.0:
+                self.publish_initialpose(x, y, yaw)
+                last_pub = time.time()
+            if self.latest_amcl is not None:
+                ax, ay, at = self.latest_amcl
+                if at >= gate_start and math.hypot(ax - x, ay - y) <= self.converge_tol_xy:
+                    converged = True
+                    break
+            fb.detail = 'waiting amcl convergence'
+            goal_handle.publish_feedback(fb)
+            time.sleep(0.3)
+
+        if not converged:
+            result.success = False
+            result.message = f'amcl did not converge to ({x:.2f},{y:.2f}) in {self.amcl_converge_timeout_sec}s'
+            goal_handle.abort()
+            self.get_logger().error(result.message)
+            return result
+
+        # global costmap이 새 /map을 반영할 시간 확보
+        fb.phase = 'COSTMAP_SETTLE'
+        fb.progress = 0.95
+        fb.detail = f'{self.costmap_settle_sec}s'
+        goal_handle.publish_feedback(fb)
+        time.sleep(self.costmap_settle_sec)
 
         self.last_key = key
         result.success = True
+
         result.message = f'map switched (key {key})'
         goal_handle.succeed()
         self.get_logger().info(result.message)
@@ -166,6 +224,11 @@ class MapSwitcher(Node):
             return
         self.publish_initialpose(x, y, yaw)
         self.get_logger().info(f'map loaded + initialpose (key {self.last_key})')
+
+    def on_amcl_pose(self, msg):
+        self.latest_amcl = (msg.pose.pose.position.x,
+                            msg.pose.pose.position.y,
+                            time.time())
 
     def publish_initialpose(self, x, y, yaw):
         m = PoseWithCovarianceStamped()

@@ -8,6 +8,7 @@
 
 import math
 import time
+import json
 
 import cv2
 import numpy as np
@@ -16,7 +17,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy
 
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
@@ -24,6 +25,8 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Int32
 
 from vicpinky_interfaces.action import RunTask
+
+IMAGE_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=5)
 
 # ── 카메라 캘리브레이션 ─────────────────────────────────────
 # 로지텍 (전방)
@@ -54,7 +57,7 @@ FLOOR_IDS         = [4, 5]       # 랜딩 마커 ID = 층 번호
 
 MARKER_LENGTH     = 0.1          # 마커 한 변 길이(m)
 BOARDING_STOP_CM  = 50.0         # 승차시 목표 거리 (cm)
-EXIT_STOP_CM      = 160.0        # 하차시 목표 거리 (cm)
+EXIT_STOP_CM      = 60.0        # 하차시 목표 거리 (cm)
 STOP_TOLERANCE_CM = 1.5          # 허용 오차
 
 ROTATE_ANGULAR_SPEED = 0.4
@@ -146,16 +149,22 @@ class ElevatorServers(Node):
 
     # ── 이미지 콜백: 검출 + pose 계산 ─────────────────────────
     def image_cb(self, msg, cam, seen_dict, pose_dict, camera_matrix, dist_coeffs):
+        self.get_logger().info(f'{cam} cb enter, rear_enabled={self.rear_enabled}')  # 임시
         if cam == "front" and self.rear_enabled:
             return
         if cam == "rear" and not self.rear_enabled:
             return
         self.frame_idx[cam] += 1
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as e:
+            self.get_logger().error(f'{cam} bridge fail: {e}')
+            return
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
         now_ids = {int(i) for i in ids.flatten()} if ids is not None else set()
-        
+
+        # 디버깅용 로그
         self.get_logger().info(f'{cam} ids: {now_ids}')
 
         for mid in set(seen_dict) | now_ids:
@@ -196,7 +205,7 @@ class ElevatorServers(Node):
         return tz_cm, tx_m
 
     # ── 서보잉: 목표거리까지 P control ────────────────────────
-    def servo_toward(self, tz_cm, tx_m, direction, target_cm):
+    def servo_toward(self, tz_cm, tx_m, direction, target_cm=BOARDING_STOP_CM):
         """direction: +1 전진(탑승), -1 후진(하차). 도착 시 True"""
         error_cm = tz_cm - target_cm
         if abs(error_cm) <= STOP_TOLERANCE_CM:
@@ -378,6 +387,7 @@ class ElevatorServers(Node):
             time.sleep(dt)
 
         # phase 3: 좌 90도 회전 (시간 기반, REP103 +angular.z = 좌회전)
+        self.stop_firm()
         rot_start = time.time()
         while rclpy.ok() and time.time() - rot_start < ROTATE_DURATION_SEC:
             if goal_handle.is_cancel_requested:
@@ -391,6 +401,7 @@ class ElevatorServers(Node):
                           0.85 + 0.14 * (time.time() - rot_start) / ROTATE_DURATION_SEC,
                           'rotating left 90deg')
             time.sleep(dt)
+        self.stop_firm()
 
         # 완료 → 전방 카메라로 복귀 (다음 탑승 대비)
         self.rear_enabled = False
@@ -407,6 +418,11 @@ class ElevatorServers(Node):
     def stop(self):
         self.cmd_pub.publish(Twist())
 
+    def stop_firm(self):
+        for _ in range(8):
+            self.cmd_pub.publish(Twist())
+            time.sleep(0.05)
+        time.sleep(0.5)
 
 def main(args=None):
     rclpy.init(args=args)
