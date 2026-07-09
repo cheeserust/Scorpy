@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # 로봇측 task server 일괄 실행 (실동작 모드)
 # 제공 서버: /nav/go_to /dock/align /elevator/wait_door_open /floor/check
-#           /map/switch /elevator/board /elevator/exit /base/rotate
+#           /map/switch /elevator/board /elevator/exit
+#           /base/drive_straight /base/rotate
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -34,6 +35,8 @@ def generate_launch_description():
         Node(package=PKG, executable='elevator_door_server', output='screen',
              parameters=[{'mock_mode': False}]),
         Node(package=PKG, executable='floor_check_server', output='screen',
+             parameters=[{'mock_mode': False}]),
+        Node(package=PKG, executable='base_drive_straight_server', output='screen',
              parameters=[{'mock_mode': False}]),
         Node(package=PKG, executable='base_rotate_server', output='screen',
              parameters=[{'mock_mode': False}]),

@@ -36,6 +36,7 @@ setup(
         'full_mission_test = vicpinky_task_servers.full_mission_test:main',
 		'aruco_pose_publisher = vicpinky_task_servers.aruco_pose_publisher:main',
 		'base_rotate_server = vicpinky_task_servers.base_rotate_server:main',
+        'base_drive_straight_server = vicpinky_task_servers.base_drive_straight_server:main',
         'floor5_delivery_sequence = vicpinky_task_servers.floor5_delivery_sequence:main',
         'floor4_return_home_sequence = vicpinky_task_servers.floor4_return_home_sequence:main',
 	    ],
