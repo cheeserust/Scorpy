@@ -122,8 +122,8 @@ static void set_dir(uint8_t id, int8_t dir)
         if (positive) DIR3_PORT->BSRR = (1u << (DIR3_PIN + 16));
         else          DIR3_PORT->BSRR = (1u << DIR3_PIN);
     } else if (id == 3) {
-        if (positive) DIR4_PORT->BSRR = (1u << DIR4_PIN);
-        else          DIR4_PORT->BSRR = (1u << (DIR4_PIN + 16));
+        if (positive) DIR4_PORT->BSRR = (1u << (DIR4_PIN + 16));
+        else          DIR4_PORT->BSRR = (1u << DIR4_PIN);
     }
 #endif
 }

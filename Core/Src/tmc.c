@@ -79,9 +79,9 @@ static void tmc5160_init_axis(uint8_t axis_id)
 static void tmc2240_init_axis(uint8_t axis_id)
 {
     tmc_write(axis_id, TMC_REG_GCONF, 0x00000000);        // SpreadCycle, STEP/DIR
-    tmc_write(axis_id, TMC_REG_DRV_CONF, 0x00000000);     // 1A peak range, low-current start
-    tmc_write(axis_id, TMC_REG_GLOBAL_SCALER, 0x00000080); // 50% current scale
-    tmc_write(axis_id, TMC_REG_IHOLD_IRUN, 0x04061004);   // IRUN=16, IHOLD=4
+    tmc_write(axis_id, TMC_REG_DRV_CONF, 0x00000002);     // 3A peak range
+    tmc_write(axis_id, TMC_REG_GLOBAL_SCALER, 0x000000F2); // about 2.0A RMS at RREF=12k
+    tmc_write(axis_id, TMC_REG_IHOLD_IRUN, 0x04041B02);   // IRUN=27, IHOLD=2
     tmc_write(axis_id, TMC_REG_TPOWERDOWN, 0x0000000A);
     tmc_write(axis_id, TMC_REG_CHOPCONF, 0x14410155);     // 16 ustep + intpol, SpreadCycle, TOFF=5
 }

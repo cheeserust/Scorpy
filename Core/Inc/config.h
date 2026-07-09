@@ -10,7 +10,7 @@
 #define BOARD_ID_BOARD2          2
 
 #ifndef BOARD_ID
-#define BOARD_ID                 BOARD_ID_BOARD2
+#define BOARD_ID                 BOARD_ID_BOARD1
 #endif
 #define ENABLE_UART 1
 #ifndef ENABLE_ESTOP_LOGIC

@@ -2,7 +2,7 @@
 
 ## 포함 기능
 
-- 팔 2~5축 STEP/DIR 제어
+- 팔 2~4축 + 베이스 1축 STEP/DIR 제어
 - TMC5160/TMC2240 Software SPI 초기 설정
 - MCP2515 SPI2 CAN 수신/송신
 - 리밋스위치 Homing
@@ -20,6 +20,9 @@
 
 
 ## 보드2 STM32F411CEU6
+현재 STM32 Board2는 베이스 제어에 사용하지 않습니다. 베이스축은 Board1 Motor ID 3으로 이동했습니다.
+Arduino Board2는 CAN `0x102/0x202/0x302`로 로봇팔 5축을 제어합니다.
+
 DIR PB6
 STEP PB7
 MISO PB0
@@ -68,11 +71,12 @@ CAN모듈
 | 0 | 2축 | 20 | 200 |
 | 1 | 3축 | 50 | 200 |
 | 2 | 4축 | 30 | 200 |
-| 3 | 5축 | 120 | 48 |
+| 3 | 베이스 1축 | 20 | 200 |
 
 Board1 Motor ID 0~2는 TMC5160, Motor ID 3은 TMC2240을 사용합니다.
+Board1 Motor ID 3의 리미트 스위치는 PB12(LIM4)입니다.
 
-Board2는 베이스 1축을 담당하며 감속비는 20, 드라이버는 TMC2240입니다.
+Arduino Board2는 팔 5축을 담당하며 감속비는 120, 모터 full steps/rev는 48입니다.
 
 ## CAN ID
 
@@ -82,7 +86,7 @@ Board2는 베이스 1축을 담당하며 감속비는 20, 드라이버는 TMC224
 | 0x010 | Enable / Disable |
 | 0x020 | Homing Start |
 | 0x030 | Clear Error |
-| 0x101 | Board1 Arm Axis Move |
+| 0x101 | Board1 Arm/Base Axis Move |
 | 0x201 | Board1 Status |
 
 ## 주의

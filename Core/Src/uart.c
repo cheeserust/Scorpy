@@ -534,8 +534,8 @@ static void raw_set_dir(uint8_t axis, int8_t dir)
         if (positive) gpio_clear_pin(DIR3_PORT, DIR3_PIN);
         else gpio_set_pin(DIR3_PORT, DIR3_PIN);
     } else if (axis == 3) {
-        if (positive) gpio_set_pin(DIR4_PORT, DIR4_PIN);
-        else gpio_clear_pin(DIR4_PORT, DIR4_PIN);
+        if (positive) gpio_clear_pin(DIR4_PORT, DIR4_PIN);
+        else gpio_set_pin(DIR4_PORT, DIR4_PIN);
     }
 #endif
 }
