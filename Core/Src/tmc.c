@@ -27,18 +27,18 @@ static const uint8_t tmc_driver_type[AXIS_COUNT] = {
 
 static void tmc_cs_low(uint8_t axis_id)
 {
-    if (axis_id == 0) GPIO_CLEAR_ODR(CS1_PORT, CS1_PIN);       // 1번 축
-    else if (axis_id == 1) GPIO_CLEAR_ODR(CS2_PORT, CS2_PIN);  // 2번 축
-    else if (axis_id == 2) GPIO_CLEAR_ODR(CS3_PORT, CS3_PIN);  // 3번 축
-    else if (axis_id == 3) GPIO_CLEAR_ODR(CS4_PORT, CS4_PIN);  // 4번 축
+    if (axis_id == 0) GPIO_CLEAR_PIN(CS1_PORT, CS1_PIN);       // 1번 축
+    else if (axis_id == 1) GPIO_CLEAR_PIN(CS2_PORT, CS2_PIN);  // 2번 축
+    else if (axis_id == 2) GPIO_CLEAR_PIN(CS3_PORT, CS3_PIN);  // 3번 축
+    else if (axis_id == 3) GPIO_CLEAR_PIN(CS4_PORT, CS4_PIN);  // 4번 축
 }
 
 static void tmc_cs_high(uint8_t axis_id)
 {
-    if (axis_id == 0) GPIO_SET_ODR(CS1_PORT, CS1_PIN);       // 1번 축
-    else if (axis_id == 1) GPIO_SET_ODR(CS2_PORT, CS2_PIN);  // 2번 축
-    else if (axis_id == 2) GPIO_SET_ODR(CS3_PORT, CS3_PIN);  // 3번 축
-    else if (axis_id == 3) GPIO_SET_ODR(CS4_PORT, CS4_PIN);  // 4번 축
+    if (axis_id == 0) GPIO_SET_PIN(CS1_PORT, CS1_PIN);       // 1번 축
+    else if (axis_id == 1) GPIO_SET_PIN(CS2_PORT, CS2_PIN);  // 2번 축
+    else if (axis_id == 2) GPIO_SET_PIN(CS3_PORT, CS3_PIN);  // 3번 축
+    else if (axis_id == 3) GPIO_SET_PIN(CS4_PORT, CS4_PIN);  // 4번 축
 }
 
 static void tmc_write(uint8_t axis_id, uint8_t addr, uint32_t data)
@@ -56,11 +56,11 @@ static void tmc_write(uint8_t axis_id, uint8_t addr, uint32_t data)
     tmc_cs_low(axis_id);  // 대상 축 TMC 선택
     for (uint8_t byte = 0; byte < 5; byte++) {
         for (int8_t bit = 7; bit >= 0; bit--) {
-            GPIO_CLEAR_ODR(TMC_CLK_PORT, TMC_CLK_PIN);  // clock low
-            if (tx[byte] & (uint8_t)(1 << bit)) GPIO_SET_ODR(TMC_MOSI_PORT, TMC_MOSI_PIN);  // bit 값 1 출력
-            else GPIO_CLEAR_ODR(TMC_MOSI_PORT, TMC_MOSI_PIN);  // bit 값 0 출력
+            GPIO_CLEAR_PIN(TMC_CLK_PORT, TMC_CLK_PIN);  // clock low
+            if (tx[byte] & (uint8_t)(1 << bit)) GPIO_SET_PIN(TMC_MOSI_PORT, TMC_MOSI_PIN);  // bit 값 1 출력
+            else GPIO_CLEAR_PIN(TMC_MOSI_PORT, TMC_MOSI_PIN);  // bit 값 0 출력
             for (volatile int delay = 0; delay < 20; delay++) {}  // setup time 확보
-            GPIO_SET_ODR(TMC_CLK_PORT, TMC_CLK_PIN);  // clock high로 bit 전송
+            GPIO_SET_PIN(TMC_CLK_PORT, TMC_CLK_PIN);  // clock high로 bit 전송
             for (volatile int delay = 0; delay < 20; delay++) {}  // hold time 확보
         }
     }

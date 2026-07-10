@@ -106,7 +106,7 @@ static void mcp_delay(void)
 
 static void mcp2515_cs_low(void)
 {
-    GPIO_CLEAR_ODR(MCP_CS_PORT, MCP_CS_PIN);
+    GPIO_CLEAR_PIN(MCP_CS_PORT, MCP_CS_PIN);
 }
 
 static void mcp2515_cs_high(void)
@@ -119,7 +119,7 @@ static void mcp2515_cs_high(void)
             break;
         }
     }
-    GPIO_SET_ODR(MCP_CS_PORT, MCP_CS_PIN);
+    GPIO_SET_PIN(MCP_CS_PORT, MCP_CS_PIN);
 }
 
 static uint8_t mcp2515_spi_txrx_byte(uint8_t data)
@@ -533,7 +533,7 @@ void spi2_init(void)
     MCP_CS_PORT->OSPEEDR &= ~(0x3 << (MCP_CS_PIN * 2));
     MCP_CS_PORT->OSPEEDR |=  (0x3 << (MCP_CS_PIN * 2));
     MCP_CS_PORT->PUPDR &= ~(0x3 << (MCP_CS_PIN * 2));
-    GPIO_SET_ODR(MCP_CS_PORT, MCP_CS_PIN);
+    GPIO_SET_PIN(MCP_CS_PORT, MCP_CS_PIN);
 
     /* PB13/PB14/PB15 = AF5 SPI2 */
     MCP_SCK_PORT->MODER &= ~(0x3 << (MCP_SCK_PIN * 2));

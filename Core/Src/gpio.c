@@ -52,7 +52,7 @@ void gpio_init(void)
     gpio_output(TMC_MOSI_PORT, TMC_MOSI_PIN);  // SPI MOSI
     gpio_output(TMC_CLK_PORT, TMC_CLK_PIN);    // SPI CLK
 
-    GPIO_SET_ODR(MOTOR_EN_PORT, MOTOR_EN_PIN); // 모터 disable
+    GPIO_SET_PIN(MOTOR_EN_PORT, MOTOR_EN_PIN); // 모터 disable
     gpio_output(MOTOR_EN_PORT, MOTOR_EN_PIN);  // 모터 드라이버 en핀 설정
     gpio_output(MCP_CS_PORT, MCP_CS_PIN);      // MCP2515 SPI CS
 
@@ -67,25 +67,25 @@ void gpio_init(void)
     gpio_af5(MCP_MISO_PORT, MCP_MISO_PIN);  // SPI2 MISO
     gpio_af5(MCP_MOSI_PORT, MCP_MOSI_PIN);  // SPI2 MOSI
 
-    GPIO_CLEAR_ODR(STEP1_PORT, STEP1_PIN);  // step 초기값 low
-    GPIO_CLEAR_ODR(STEP2_PORT, STEP2_PIN);  // step 초기값 low
-    GPIO_CLEAR_ODR(STEP3_PORT, STEP3_PIN);  // step 초기값 low
-    GPIO_CLEAR_ODR(STEP4_PORT, STEP4_PIN);  // step 초기값 low
-    GPIO_SET_ODR(CS1_PORT, CS1_PIN);        // TMC5160 CS 초기값 high
-    GPIO_SET_ODR(CS2_PORT, CS2_PIN);        // TMC5160 CS 초기값 high
-    GPIO_SET_ODR(CS3_PORT, CS3_PIN);        // TMC5160 CS 초기값 high
-    GPIO_SET_ODR(CS4_PORT, CS4_PIN);        // TMC2240 CS 초기값 high
-    GPIO_SET_ODR(TMC_CLK_PORT, TMC_CLK_PIN); // TMC CLK idle high
-    GPIO_SET_ODR(MOTOR_EN_PORT, MOTOR_EN_PIN); // 모터 en핀 초기값 high(disable)
-    GPIO_SET_ODR(MCP_CS_PORT, MCP_CS_PIN);   // MCP2515 CS 초기값 high
+    GPIO_CLEAR_PIN(STEP1_PORT, STEP1_PIN);  // step 초기값 low
+    GPIO_CLEAR_PIN(STEP2_PORT, STEP2_PIN);  // step 초기값 low
+    GPIO_CLEAR_PIN(STEP3_PORT, STEP3_PIN);  // step 초기값 low
+    GPIO_CLEAR_PIN(STEP4_PORT, STEP4_PIN);  // step 초기값 low
+    GPIO_SET_PIN(CS1_PORT, CS1_PIN);        // TMC5160 CS 초기값 high
+    GPIO_SET_PIN(CS2_PORT, CS2_PIN);        // TMC5160 CS 초기값 high
+    GPIO_SET_PIN(CS3_PORT, CS3_PIN);        // TMC5160 CS 초기값 high
+    GPIO_SET_PIN(CS4_PORT, CS4_PIN);        // TMC2240 CS 초기값 high
+    GPIO_SET_PIN(TMC_CLK_PORT, TMC_CLK_PIN); // TMC CLK idle high
+    GPIO_SET_PIN(MOTOR_EN_PORT, MOTOR_EN_PIN); // 모터 en핀 초기값 high(disable)
+    GPIO_SET_PIN(MCP_CS_PORT, MCP_CS_PIN);   // MCP2515 CS 초기값 high
 }
 
 void motor_enable(void)
 {
-    GPIO_CLEAR_ODR(MOTOR_EN_PORT, MOTOR_EN_PIN);  // 모터en핀 active low
+    GPIO_CLEAR_PIN(MOTOR_EN_PORT, MOTOR_EN_PIN);  // 모터en핀 active low
 }
 
 void motor_disable(void)
 {
-    GPIO_SET_ODR(MOTOR_EN_PORT, MOTOR_EN_PIN);  // 모터en핀 active low
+    GPIO_SET_PIN(MOTOR_EN_PORT, MOTOR_EN_PIN);  // 모터en핀 active low
 }

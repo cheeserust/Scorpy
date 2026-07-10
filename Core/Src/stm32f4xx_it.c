@@ -17,7 +17,8 @@ static void tim2_init_10us(void)
     TIM2->ARR = 10 - 1;   // 10us마다 interrupt 발생
     TIM2->DIER |= TIM_DIER_UIE;       // interrupt enable
     TIM2->CR1 |= TIM_CR1_CEN;         // TIM2 카운터 시작
-    NVIC_SetPriority(TIM2_IRQn, 2);
+    /* STEP pulse timing must preempt the slower 1ms trajectory/homing work. */
+    NVIC_SetPriority(TIM2_IRQn, 1);
     NVIC_EnableIRQ(TIM2_IRQn);        // TIM2 인터럽트 NVIC 활성화
 }
 

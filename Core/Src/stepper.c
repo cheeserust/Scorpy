@@ -13,7 +13,9 @@ static uint32_t total_move_ticks;
 
 static volatile uint8_t step_high_flag[AXIS_COUNT];
 static volatile uint8_t g_limit_switch_bitmask = 0;
-static volatile uint8_t g_homing_step_request_bits = 0;
+/* TIM3가 요청하고 더 높은 우선순위의 TIM2가 소비한다.
+ * 축별 byte 대입을 사용해 bitmask read-modify-write 선점 경쟁을 피한다. */
+static volatile uint8_t g_homing_step_request[AXIS_COUNT];
 static uint32_t g_axis_total_steps[AXIS_COUNT];
 
 
@@ -227,6 +229,7 @@ void stepper_init(void)
         g_motion_start_step[i] = 0;
         limit_switch_debounce_count[i] = 0;
         homing_tick[i] = 0;
+        g_homing_step_request[i] = 0;
         axis_dda_accumulator[i] = 0;
         step_wait_10us[i] = 0;
         step_pin_low(i);
@@ -239,6 +242,7 @@ void stepper_stop_axis(uint8_t id)
     if (id >= AXIS_COUNT) return;
 
     step_pin_low(id);
+    g_homing_step_request[id] = 0;
     axis_dda_accumulator[id] = 0;
     step_wait_10us[id] = 0;
     g_target_step[id] = g_current_step[id];
@@ -267,15 +271,16 @@ void stepper_start_homing(uint8_t id)
     }
     if (ESTOP_ACTIVE() || !g_enabled || g_error_code != ERR_NONE) return;
 
-    g_homing_active = 1;
     g_homing_done_bits &= (uint8_t)~(1u << id);
     g_state = STATE_HOMING;
     limit_switch_debounce_count[id] = 0;
     homing_tick[id] = 0;
+    g_homing_step_request[id] = 0;
     step_wait_10us[id] = 0;
     g_target_step[id] = g_current_step[id];
     step_pin_low(id);
     set_dir(id, home_dir[id]);
+    g_homing_active = 1;
 }
 
 // 모든 축 홈
@@ -283,7 +288,6 @@ void stepper_start_homing_all(void)
 {
     if (ESTOP_ACTIVE() || !g_enabled || g_error_code != ERR_NONE) return;
 
-    g_homing_active = 1;
     g_homing_done_bits = 0;
     g_motion_active = 0;
     stepper_cancel_motion();
@@ -292,11 +296,13 @@ void stepper_start_homing_all(void)
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         limit_switch_debounce_count[i] = 0;
         homing_tick[i] = 0;
+        g_homing_step_request[i] = 0;
         step_wait_10us[i] = 0;
         g_target_step[i] = g_current_step[i];
         step_pin_low(i);
         set_dir(i, home_dir[i]);
     }
+    g_homing_active = 1;
 }
 
 void stepper_homing_1ms(void)
@@ -318,6 +324,7 @@ void stepper_homing_1ms(void)
         // 리밋 스위치 체크
         if (g_limit_switch_bitmask & (1 << i)) {
             int32_t home_step = angle_to_step(i, get_home_angle(i));
+            g_homing_step_request[i] = 0;
             g_current_step[i] = home_step;
             g_target_step[i] = home_step;
             g_motion_start_step[i] = home_step;
@@ -329,17 +336,16 @@ void stepper_homing_1ms(void)
         // 이동 주기 도달 시
         if (++homing_tick[i] >= HOMING_INTERVAL_MS) {
             homing_tick[i] = 0;
-            
-            // ★ [변경] 직접 핀을 켜지 않고, 10us 방에 "스텝 쏴줘!" 라고 플래그 세우기
-            g_homing_step_request_bits |= (uint8_t)(1 << i); 
-            
-            // 위치 카운트는 여기서 미리 진행
-            if (home_dir[i] > 0) g_current_step[i]++;
-            else                 g_current_step[i]--;
+
+            // 실제 펄스와 위치 갱신은 10us ISR에서 함께 처리한다.
+            g_homing_step_request[i] = 1;
         }
     }
 
     if (system_all_homed()) {
+        for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+            g_homing_step_request[i] = 0;
+        }
         g_homing_active = 0;
         g_state = STATE_IDLE;
     }
@@ -379,14 +385,16 @@ void stepper_10us_interrupt(void)
     if (g_homing_active) {
         for (uint8_t i = 0; i < AXIS_COUNT; i++) {
             // 1ms 방에서 이 축에 스텝을 쏘라고 요청했는지 확인
-            if (g_homing_step_request_bits & (uint8_t)(1 << i)) {
-                
+            if (g_homing_step_request[i]) {
+
                 // 1. 요청을 확인했으니 플래그를 즉시 클리어 (중복 처리 방지)
-                g_homing_step_request_bits &= (uint8_t)~(1 << i);
-                
+                g_homing_step_request[i] = 0;
+
                 // 2. 정확한 하드웨어 타이밍으로 신호 출력
                 set_dir(i, home_dir[i]);
-                step_pin_high(i); 
+                step_pin_high(i);
+                if (home_dir[i] > 0) g_current_step[i]++;
+                else                 g_current_step[i]--;
             }
         }
         return; // 홈잉 중에는 아래의 일반 모션 로직을 타지 않음
