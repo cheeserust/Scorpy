@@ -71,7 +71,13 @@ static void tmc5160_init_axis(uint8_t axis_id)
 {
     tmc_write(axis_id, TMC_REG_GCONF, 0x00000000);       // SpreadCycle, en_pwm_mode=0
     tmc_write(axis_id, TMC_REG_GLOBAL_SCALER, 0x00000000); // full scale current, 0은 256으로 처리
-    tmc_write(axis_id, TMC_REG_IHOLD_IRUN, 0x00061004);  // IHOLD=4 IRUN=16 IHOLDDELAY=6 IRUNDELAY=0
+    if (axis_id == 0) {
+        tmc_write(axis_id, TMC_REG_IHOLD_IRUN, (6 << 16) | (26 << 8) | 16);  // IHOLDDELAY=6 IRUN=24 IHOLD=17
+    } else if (axis_id == 2) {
+        tmc_write(axis_id, TMC_REG_IHOLD_IRUN, (6 << 16) | (18 << 8) | 10);  // IHOLDDELAY=6 IRUN=18 IHOLD=10
+    } else {
+        tmc_write(axis_id, TMC_REG_IHOLD_IRUN, (6 << 16) | (16 << 8) | 4);  // IHOLDDELAY=6 IRUN=16 IHOLD=4
+    }
     tmc_write(axis_id, TMC_REG_TPOWERDOWN, 0x0000000A);  // standstill 전류 감소 대기
     tmc_write(axis_id, TMC_REG_CHOPCONF, 0x14010044);    // MRES=4 -> 16 microstep, intpol=1 -> 내부 256 microstep 보간, TPFD=4, TBL=2, chm=0 -> SpreadCycle, TOFF=4 
 }
@@ -81,7 +87,7 @@ static void tmc2240_init_axis(uint8_t axis_id)
     tmc_write(axis_id, TMC_REG_GCONF, 0x00000000);        // SpreadCycle, STEP/DIR
     tmc_write(axis_id, TMC_REG_DRV_CONF, 0x00000002);     // 3A peak range
     tmc_write(axis_id, TMC_REG_GLOBAL_SCALER, 0x000000F2); // about 2.0A RMS at RREF=12k
-    tmc_write(axis_id, TMC_REG_IHOLD_IRUN, 0x04041B02);   // IRUN=27, IHOLD=2
+    tmc_write(axis_id, TMC_REG_IHOLD_IRUN, (4 << 24) | (4 << 16) | (27 << 8) | 2); // IRUNDELAY=4 IHOLDDELAY=4 IRUN=27 IHOLD=2
     tmc_write(axis_id, TMC_REG_TPOWERDOWN, 0x0000000A);
     tmc_write(axis_id, TMC_REG_CHOPCONF, 0x14410155);     // 16 ustep + intpol, SpreadCycle, TOFF=5
 }

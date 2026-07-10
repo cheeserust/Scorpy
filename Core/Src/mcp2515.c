@@ -25,6 +25,23 @@ volatile uint8_t g_mcp2515_irq_pending = 0;
 #define MCP_CANINTF     0x2C
 #define MCP_EFLG        0x2D
 
+#define MCP_RXF0SIDH    0x00
+#define MCP_RXF0SIDL    0x01
+#define MCP_RXF1SIDH    0x04
+#define MCP_RXF1SIDL    0x05
+#define MCP_RXF2SIDH    0x08
+#define MCP_RXF2SIDL    0x09
+#define MCP_RXF3SIDH    0x10
+#define MCP_RXF3SIDL    0x11
+#define MCP_RXF4SIDH    0x14
+#define MCP_RXF4SIDL    0x15
+#define MCP_RXF5SIDH    0x18
+#define MCP_RXF5SIDL    0x19
+#define MCP_RXM0SIDH    0x20
+#define MCP_RXM0SIDL    0x21
+#define MCP_RXM1SIDH    0x24
+#define MCP_RXM1SIDL    0x25
+
 #define MCP_TXB0CTRL    0x30
 #define MCP_TXB0SIDH    0x31
 #define MCP_TXB0SIDL    0x32
@@ -149,6 +166,14 @@ static void mcp_write_reg(uint8_t addr, uint8_t data)
     mcp2515_cs_high();
 }
 
+static void mcp_write_standard_id(uint8_t sidh_addr, uint16_t id)
+{
+    mcp_write_reg(sidh_addr, (uint8_t)(id >> 3));
+    mcp_write_reg((uint8_t)(sidh_addr + 1), (uint8_t)((id & 0x7) << 5));
+    mcp_write_reg((uint8_t)(sidh_addr + 2), 0x00);
+    mcp_write_reg((uint8_t)(sidh_addr + 3), 0x00);
+}
+
 static void mcp_bit_modify(uint8_t addr, uint8_t mask, uint8_t data)
 {
     mcp2515_cs_low();
@@ -219,6 +244,22 @@ static void mcp_set_500k_bitrate(void)
     mcp_write_reg(MCP_CNF3, 0x01);
 }
 
+static void mcp_configure_rx_filters(void)
+{
+    mcp_write_standard_id(MCP_RXM0SIDH, 0x7FF);
+    mcp_write_standard_id(MCP_RXM1SIDH, 0x7FF);
+
+    mcp_write_standard_id(MCP_RXF0SIDH, CAN_ID_ESTOP);
+    mcp_write_standard_id(MCP_RXF1SIDH, CAN_ID_ENABLE);
+    mcp_write_standard_id(MCP_RXF2SIDH, CAN_ID_HOMING);
+    mcp_write_standard_id(MCP_RXF3SIDH, CAN_ID_CLEAR_ERROR);
+    mcp_write_standard_id(MCP_RXF4SIDH, BOARD_MOVE_CAN_ID);
+    mcp_write_standard_id(MCP_RXF5SIDH, BOARD_MOVE_CAN_ID);
+
+    mcp_write_reg(MCP_RXB0CTRL, 0x04);   /* Use filters, enable rollover to RXB1 */
+    mcp_write_reg(MCP_RXB1CTRL, 0x00);   /* Use filters */
+}
+
 static void mcp_exti_init(void)
 {
     /* MCP2515 INT, active-low falling edge */
@@ -264,9 +305,7 @@ uint8_t mcp2515_init_500k(void)
 
     mcp_set_500k_bitrate();
 
-    /* Accept all standard IDs during bring-up. Filtering is done in firmware. */
-    mcp_write_reg(MCP_RXB0CTRL, 0x64);   /* RXM=11, BUKT=1 */
-    mcp_write_reg(MCP_RXB1CTRL, 0x60);   /* RXM=11 */
+    mcp_configure_rx_filters();
 
     mcp_write_reg(MCP_CANINTF, 0x00);
     mcp_write_reg(MCP_CANINTE, MCP_RX0IF | MCP_RX1IF | MCP_ERRIF | MCP_MERRF);
