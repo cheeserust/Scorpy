@@ -56,12 +56,18 @@
             <h2>Driving Map</h2>
             <div id="drivingMapMeta" class="meta-line">Waiting for /map</div>
           </div>
-          <div id="drivingStateChip" class="status-chip neutral">Waiting</div>
+          <div class="driving-map-actions">
+            <button id="initialPoseButton" class="secondary-button" type="button">
+              Set Pose
+            </button>
+            <div id="drivingStateChip" class="status-chip neutral">Waiting</div>
+          </div>
         </div>
 
         <div class="driving-map-layout">
           <div class="map-canvas-wrap">
             <canvas id="drivingMapCanvas" width="960" height="560"></canvas>
+            <div id="initialPoseHint" class="map-hint">Set Pose: drag on map</div>
           </div>
           <dl class="status-list compact-status driving-status-list">
             <div>

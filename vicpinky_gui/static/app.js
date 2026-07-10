@@ -18,6 +18,10 @@ const state = {
   drivingMapRevision: null,
   drivingMap: null,
   drivingMapLoading: false,
+  latestDriving: {},
+  initialPoseMode: false,
+  initialPoseDraft: null,
+  initialPoseSending: false,
 };
 
 const elevatorFsmStates = [
@@ -941,13 +945,18 @@ const drawEmptyDrivingMap = (message = "Waiting for /map") => {
   ctx.fillText(message, width / 2, height / 2);
 };
 
-const DRIVING_MAP_ROTATION = 90;
+const drivingMapRotation = (map) => {
+  const width = Number(map?.width || 0);
+  const height = Number(map?.height || 0);
+  return height > width ? 90 : 0;
+};
 
 const mapFit = (map, canvasWidth, canvasHeight) => {
   const width = Number(map?.width || 0);
   const height = Number(map?.height || 0);
   if (!width || !height) return null;
-  const rotated = DRIVING_MAP_ROTATION === 90 || DRIVING_MAP_ROTATION === 270;
+  const rotation = drivingMapRotation(map);
+  const rotated = rotation === 90 || rotation === 270;
   const displayWidth = rotated ? height : width;
   const displayHeight = rotated ? width : height;
   const scale = Math.min(canvasWidth / displayWidth, canvasHeight / displayHeight);
@@ -959,6 +968,7 @@ const mapFit = (map, canvasWidth, canvasHeight) => {
     height,
     displayWidth,
     displayHeight,
+    rotation,
   };
 };
 
@@ -967,7 +977,7 @@ const worldToCanvas = (map, fit, x, y) => {
   const resolution = Number(map.resolution || 0.05);
   const mx = (Number(x) - Number(origin.x || 0)) / resolution;
   const my = fit.height - (Number(y) - Number(origin.y || 0)) / resolution;
-  if (DRIVING_MAP_ROTATION === 90) {
+  if (fit.rotation === 90) {
     return {
       x: fit.left + (fit.height - my) * fit.scale,
       y: fit.top + mx * fit.scale,
@@ -976,6 +986,38 @@ const worldToCanvas = (map, fit, x, y) => {
   return {
     x: fit.left + mx * fit.scale,
     y: fit.top + my * fit.scale,
+  };
+};
+
+const canvasToWorld = (map, fit, x, y) => {
+  const origin = map.origin || {};
+  const resolution = Number(map.resolution || 0.05);
+  let mx;
+  let my;
+
+  if (fit.rotation === 90) {
+    mx = (y - fit.top) / fit.scale;
+    my = fit.height - (x - fit.left) / fit.scale;
+  } else {
+    mx = (x - fit.left) / fit.scale;
+    my = (y - fit.top) / fit.scale;
+  }
+
+  if (mx < 0 || my < 0 || mx > fit.width || my > fit.height) {
+    return null;
+  }
+
+  return {
+    x: Number(origin.x || 0) + mx * resolution,
+    y: Number(origin.y || 0) + (fit.height - my) * resolution,
+  };
+};
+
+const pointerCanvasPoint = (canvas, event) => {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (canvas.width / rect.width),
+    y: (event.clientY - rect.top) * (canvas.height / rect.height),
   };
 };
 
@@ -1037,7 +1079,7 @@ const drawPose = (ctx, map, fit, pose, canvasWidth) => {
   if (!pose?.available) return;
   const point = worldToCanvas(map, fit, pose.x, pose.y);
   const yaw = Number(pose.yaw || 0);
-  const yawRotation = DRIVING_MAP_ROTATION === 90 ? Math.PI / 2 : 0;
+  const yawRotation = fit.rotation === 90 ? Math.PI / 2 : 0;
   const radius = Math.max(7, canvasWidth / 90);
   const arrow = radius * 2.2;
 
@@ -1057,6 +1099,35 @@ const drawPose = (ctx, map, fit, pose, canvasWidth) => {
   ctx.lineTo(arrow - radius * 0.55, -radius * 0.45);
   ctx.moveTo(arrow, 0);
   ctx.lineTo(arrow - radius * 0.55, radius * 0.45);
+  ctx.stroke();
+  ctx.restore();
+};
+
+const drawInitialPoseDraft = (ctx, map, fit, canvasWidth) => {
+  const draft = state.initialPoseDraft;
+  if (!draft) return;
+
+  const point = worldToCanvas(map, fit, draft.x, draft.y);
+  const yawRotation = fit.rotation === 90 ? Math.PI / 2 : 0;
+  const radius = Math.max(8, canvasWidth / 85);
+  const arrow = radius * 2.5;
+
+  ctx.save();
+  ctx.translate(point.x, point.y);
+  ctx.rotate(-draft.yaw + yawRotation);
+  ctx.fillStyle = "rgba(45, 106, 207, 0.88)";
+  ctx.strokeStyle = "#153e90";
+  ctx.lineWidth = Math.max(2, canvasWidth / 520);
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(arrow, 0);
+  ctx.lineTo(arrow - radius * 0.6, -radius * 0.5);
+  ctx.moveTo(arrow, 0);
+  ctx.lineTo(arrow - radius * 0.6, radius * 0.5);
   ctx.stroke();
   ctx.restore();
 };
@@ -1085,7 +1156,7 @@ const drawDrivingMap = (driving = {}) => {
   ctx.fillRect(0, 0, width, height);
   ctx.imageSmoothingEnabled = false;
   ctx.save();
-  if (DRIVING_MAP_ROTATION === 90) {
+  if (fit.rotation === 90) {
     ctx.translate(fit.left + fit.displayWidth * fit.scale, fit.top);
     ctx.rotate(Math.PI / 2);
     ctx.drawImage(offscreen, 0, 0, fit.width * fit.scale, fit.height * fit.scale);
@@ -1111,12 +1182,14 @@ const drawDrivingMap = (driving = {}) => {
   drawPath(ctx, map, fit, driving.global_path, "#006d77", Math.max(2, width / 360));
   drawPath(ctx, map, fit, driving.local_path, "#f0b429", Math.max(2, width / 420));
   drawPose(ctx, map, fit, driving.pose, width);
+  drawInitialPoseDraft(ctx, map, fit, width);
 };
 
 const loadDrivingMapIfNeeded = async (mapMeta = {}) => {
   if (!mapMeta.available || !mapMeta.data_url) {
     state.drivingMap = null;
     state.drivingMapRevision = null;
+    state.initialPoseDraft = null;
     drawDrivingMap({ map: mapMeta });
     return;
   }
@@ -1131,6 +1204,7 @@ const loadDrivingMapIfNeeded = async (mapMeta = {}) => {
     const payload = await api(mapMeta.data_url);
     state.drivingMap = payload.map || null;
     state.drivingMapRevision = state.drivingMap?.revision ?? null;
+    state.initialPoseDraft = null;
   } catch (error) {
     $("drivingMapMeta").textContent = `Map fetch failed: ${error.message}`;
   } finally {
@@ -1138,7 +1212,104 @@ const loadDrivingMapIfNeeded = async (mapMeta = {}) => {
   }
 };
 
+const updateInitialPoseUi = () => {
+  const button = $("initialPoseButton");
+  const wrapper = $("drivingMapCanvas")?.parentElement;
+  if (!button || !wrapper) return;
+
+  wrapper.classList.toggle("pose-mode", state.initialPoseMode);
+  button.textContent = state.initialPoseMode ? "Cancel Pose" : "Set Pose";
+  button.classList.toggle("primary-button", state.initialPoseMode);
+  button.classList.toggle("secondary-button", !state.initialPoseMode);
+};
+
+const setInitialPoseMode = (enabled) => {
+  state.initialPoseMode = Boolean(enabled);
+  state.initialPoseDraft = null;
+  updateInitialPoseUi();
+  drawDrivingMap(state.latestDriving || {});
+};
+
+const sendInitialPose = async (pose) => {
+  if (state.initialPoseSending) return;
+  state.initialPoseSending = true;
+  try {
+    await api("/api/driving/initial-pose", {
+      method: "POST",
+      body: JSON.stringify({
+        x: pose.x,
+        y: pose.y,
+        yaw: pose.yaw,
+        frame_id: state.drivingMap?.frame_id || "map",
+      }),
+    });
+    setInitialPoseMode(false);
+    await poll();
+  } catch (error) {
+    setConnection(`INITIAL POSE FAILED | ${error.message}`, "offline");
+    state.initialPoseDraft = null;
+    drawDrivingMap(state.latestDriving || {});
+  } finally {
+    state.initialPoseSending = false;
+  }
+};
+
+const beginInitialPoseDrag = (event) => {
+  if (!state.initialPoseMode || !state.drivingMap) return;
+
+  const canvas = $("drivingMapCanvas");
+  const fit = mapFit(state.drivingMap, canvas.width, canvas.height);
+  if (!fit) return;
+
+  const point = pointerCanvasPoint(canvas, event);
+  const world = canvasToWorld(state.drivingMap, fit, point.x, point.y);
+  if (!world) return;
+
+  event.preventDefault();
+  canvas.setPointerCapture?.(event.pointerId);
+  state.initialPoseDraft = {
+    ...world,
+    yaw: Number(state.latestDriving?.pose?.yaw || 0),
+    pointerId: event.pointerId,
+  };
+  drawDrivingMap(state.latestDriving || {});
+};
+
+const updateInitialPoseDrag = (event) => {
+  if (!state.initialPoseMode || !state.initialPoseDraft || !state.drivingMap) return;
+  if (state.initialPoseDraft.pointerId !== event.pointerId) return;
+
+  const canvas = $("drivingMapCanvas");
+  const fit = mapFit(state.drivingMap, canvas.width, canvas.height);
+  if (!fit) return;
+
+  const point = pointerCanvasPoint(canvas, event);
+  const world = canvasToWorld(state.drivingMap, fit, point.x, point.y);
+  if (!world) return;
+
+  const dx = world.x - state.initialPoseDraft.x;
+  const dy = world.y - state.initialPoseDraft.y;
+  if (Math.hypot(dx, dy) > Number(state.drivingMap.resolution || 0.05) * 2) {
+    state.initialPoseDraft.yaw = Math.atan2(dy, dx);
+  }
+  drawDrivingMap(state.latestDriving || {});
+};
+
+const finishInitialPoseDrag = (event) => {
+  if (!state.initialPoseMode || !state.initialPoseDraft) return;
+  if (state.initialPoseDraft.pointerId !== event.pointerId) return;
+
+  const pose = {
+    x: state.initialPoseDraft.x,
+    y: state.initialPoseDraft.y,
+    yaw: state.initialPoseDraft.yaw,
+  };
+  state.initialPoseDraft = null;
+  sendInitialPose(pose);
+};
+
 const renderDriving = (driving = {}) => {
+  state.latestDriving = driving;
   const map = driving.map || {};
   const pose = driving.pose || {};
   const odom = driving.odom || {};
@@ -1465,6 +1636,16 @@ document.addEventListener("DOMContentLoaded", () => {
   $("navForm").addEventListener("submit", startDirectNav);
   $("cancelNavButton").addEventListener("click", cancelDirectNav);
   $("navFloor").addEventListener("change", () => renderNavLocationOptions());
+  $("initialPoseButton").addEventListener("click", () => {
+    setInitialPoseMode(!state.initialPoseMode);
+  });
+  $("drivingMapCanvas").addEventListener("pointerdown", beginInitialPoseDrag);
+  $("drivingMapCanvas").addEventListener("pointermove", updateInitialPoseDrag);
+  $("drivingMapCanvas").addEventListener("pointerup", finishInitialPoseDrag);
+  $("drivingMapCanvas").addEventListener("pointercancel", () => {
+    state.initialPoseDraft = null;
+    drawDrivingMap(state.latestDriving || {});
+  });
   $("statusButton").addEventListener("click", () => postArmCommand("status"));
   $("estopTopButton").addEventListener("click", () => postArmCommand("estop"));
   $("sendArmManualButton").addEventListener("click", () => sendManual("arm"));

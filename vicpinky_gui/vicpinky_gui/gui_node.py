@@ -329,6 +329,7 @@ class VicPinkyGuiNode(Node):
         self._local_path_topic = str(
             self.get_parameter('local_path_topic').value
         )
+        self._initial_pose_topic = '/initialpose'
 
         self._driving_map: dict[str, Any] | None = None
         self._driving_map_seen_at: float | None = None
@@ -452,6 +453,11 @@ class VicPinkyGuiNode(Node):
             self._local_path_callback,
             10,
             callback_group=self._callback_group,
+        )
+        self._initial_pose_publisher = self.create_publisher(
+            PoseWithCovarianceStamped,
+            self._initial_pose_topic,
+            10,
         )
 
         self._flask_app: Flask | None = None
@@ -636,6 +642,17 @@ class VicPinkyGuiNode(Node):
         def api_nav_cancel():
             response = self.cancel_direct_nav()
             return jsonify(response), 200 if response.get('ok') else 409
+
+        @app.post('/api/driving/initial-pose')
+        def api_driving_initial_pose():
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                payload = {}
+            response = self.publish_initial_pose(payload)
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
 
         @app.errorhandler(404)
         def api_not_found(_error):
@@ -1415,6 +1432,13 @@ class VicPinkyGuiNode(Node):
             + float(orientation.z) * float(orientation.z)
         )
         return math.atan2(siny_cosp, cosy_cosp)
+
+    @staticmethod
+    def _assign_yaw_to_quaternion(orientation: Any, yaw: float) -> None:
+        orientation.x = 0.0
+        orientation.y = 0.0
+        orientation.z = math.sin(yaw / 2.0)
+        orientation.w = math.cos(yaw / 2.0)
 
     @classmethod
     def _path_to_dict(cls, msg: NavPath, topic: str) -> dict[str, Any]:
@@ -2944,6 +2968,76 @@ class VicPinkyGuiNode(Node):
             'ok': canceling,
             'message': 'Direct nav cancel requested'
             if canceling else 'Direct nav cancel rejected',
+        }
+
+    def publish_initial_pose(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Publish an AMCL initial pose from the dashboard map."""
+        try:
+            x = float(payload['x'])
+            y = float(payload['y'])
+            yaw = float(payload['yaw'])
+        except (KeyError, TypeError, ValueError) as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Invalid initial pose payload: {exc}',
+            }
+
+        if not all(math.isfinite(value) for value in (x, y, yaw)):
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': 'Initial pose values must be finite numbers',
+            }
+
+        with self._lock:
+            frame_id = str(
+                payload.get('frame_id')
+                or (self._driving_map or {}).get('frame_id')
+                or 'map'
+            )
+
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.position.z = 0.0
+        self._assign_yaw_to_quaternion(msg.pose.pose.orientation, yaw)
+
+        covariance = [0.0] * 36
+        covariance[0] = 0.25
+        covariance[7] = 0.25
+        covariance[35] = 0.06853892326654787
+        msg.pose.covariance = covariance
+
+        self._initial_pose_publisher.publish(msg)
+
+        summary = {
+            'topic': self._initial_pose_topic,
+            'frame_id': frame_id,
+            'x': x,
+            'y': y,
+            'yaw': yaw,
+            'yaw_deg': math.degrees(yaw),
+            'sent_at': self._now_iso(),
+        }
+        with self._lock:
+            self._append_event_locked(
+                kind='driving',
+                level='info',
+                event_type='INITIAL_POSE',
+                message=(
+                    f'Initial pose published: x={x:.3f}, y={y:.3f}, '
+                    f'yaw={math.degrees(yaw):.1f} deg'
+                ),
+                payload=summary,
+            )
+
+        return {
+            'ok': True,
+            'message': 'Initial pose published',
+            'initial_pose': summary,
         }
 
     def start_mission(self, payload: dict[str, Any]) -> dict[str, Any]:

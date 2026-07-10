@@ -499,7 +499,14 @@ label {
   align-items: start;
 }
 
+.driving-map-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .map-canvas-wrap {
+  position: relative;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -511,6 +518,29 @@ label {
   display: block;
   width: 100%;
   min-height: 260px;
+}
+
+.map-canvas-wrap.pose-mode #drivingMapCanvas {
+  cursor: crosshair;
+}
+
+.map-hint {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 8px;
+  pointer-events: none;
+}
+
+.map-canvas-wrap.pose-mode .map-hint {
+  display: block;
 }
 
 .driving-status-list {
