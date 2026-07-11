@@ -55,7 +55,7 @@ REAR_IMAGE_TOPIC  = "/rear_camera/image_raw"
 FLOOR_IDS         = [4, 5]       # 랜딩 마커 ID = 층 번호
 
 MARKER_LENGTH     = 0.1          # 마커 한 변 길이(m)
-BOARDING_STOP_CM  = 50.0         # 승차시 목표 거리 (cm)
+BOARDING_STOP_CM  = 60.0         # 승차시 목표 거리 (cm)
 EXIT_STOP_CM      = 60.0        # 하차시 목표 거리 (cm)
 STOP_TOLERANCE_CM = 1.5          # 허용 오차
 
@@ -63,7 +63,7 @@ ROTATE_ANGULAR_SPEED = 0.4
 ROTATE_ANGLE_DEG     = 90.0
 ROTATE_DURATION_SEC  = math.radians(ROTATE_ANGLE_DEG) / ROTATE_ANGULAR_SPEED
 
-MAX_LINEAR        = 0.3          # m/s
+MAX_LINEAR        = 0.2          # m/s
 MIN_LINEAR        = 0.1          # m/s
 KP_LINEAR         = 0.01
 KP_ANGULAR        = 0.5
@@ -164,7 +164,8 @@ class ElevatorServers(Node):
         now_ids = {int(i) for i in ids.flatten()} if ids is not None else set()
 
         # 디버깅용 로그
-        self.get_logger().info(f'{cam} ids: {now_ids}')
+        if self.frame_idx[cam] % 5 == 0:
+            self.get_logger().info(f'{cam} ids: {now_ids}')
 
         for mid in set(seen_dict) | now_ids:
             seen_dict[mid] = (min(seen_dict.get(mid, 0) + 1, DEBOUNCE_FRAMES)

@@ -27,7 +27,7 @@ class ElevatorFrontSequenceTest(Node):
         self.nav_cancel_marker_distance_m = 1.5
 
         # 최종 정렬 목표
-        self.align_target_distance_m = 1.45
+        self.align_target_distance_m = 1.35
         self.align_target_lateral_m = 0.0
 
         self.latest_marker_id = None
@@ -99,7 +99,7 @@ class ElevatorFrontSequenceTest(Node):
         self.get_logger().info('Move forward 60cm before rotate.')
 
         speed = 0.05
-        duration = 12.0  # 0.05m/s * 12s = 0.60m
+        duration = 10.0  # 0.05m/s * 12s = 0.60m
 
         start_time = time.time()
         while time.time() - start_time < duration:
