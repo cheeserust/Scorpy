@@ -328,7 +328,7 @@ void trajectory_1ms_interrupt(void)
         }
     }
 
-    // 큐에서 새 모션을 시작하지 못했다면(큐가 비었음) 즉시 탈출
+    // 큐에서 새 모션을 시작하지 못했다면(큐 비었음) 즉시 탈출
     if (!g_motion_active) return;
 
 

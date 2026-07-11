@@ -471,7 +471,17 @@ payload = B8 0B 00 00 00 00 00 00
 
 ## 11. Queue and Error Policy
 
-Board1 STM32 trajectory queue는 외부 status 기준으로 32개의 `0x101` command slot입니다. 내부 구현은 4축 point queue 8개이며, 한 4축 point가 command slot 4개를 사용합니다.
+Board1 STM32 trajectory queue의 `TRAJECTORY_QUEUE_SIZE`는 CAN move frame(`0x101`) 기준의 논리적 queue 예산이며, 시간(ms)이나 바이트 수가 아닙니다. Board1은 Motor ID `0 -> 1 -> 2 -> 3`의 4개 frame을 하나의 동기화된 trajectory point로 staging합니다.
+
+현재 구현 기준으로는 다음과 같습니다.
+
+- `TRAJECTORY_QUEUE_SIZE = 128`
+- 내부 point 배열: `128 / 4 = 32`개 point 슬롯
+- 원형 큐의 empty/full 구분을 위해 1개 슬롯을 비우므로 실제 대기 가능: 31개 point
+- 외부 `0x101` command frame 기준 실제 대기 가능: `31 x 4 = 124`개 frame
+- Status Byte5 `Queue Free`는 위 command frame 기준의 남은 슬롯 수를 보고하며, 빈 큐의 최대값은 124입니다.
+
+현재 실행 중인 point는 queue에서 꺼내 실행하므로, queue에 대기 중인 point 수와 현재 실행 중인 point는 별도로 보아야 합니다.
 
 Arduino Board2 trajectory queue는 단일 축 point queue로 구성합니다. 외부 status의 Queue Free는 `0x102` command slot 기준으로 보고합니다.
 
@@ -486,6 +496,17 @@ Queue full 상태에서 새 위치 명령이 오면:
 - `0x030 Clear Error`는 비동기 clear 요청으로 등록되며, TIM3가 기존 queue 소진을 확인한 뒤 latch를 해제합니다.
 - 상위 제어기는 status Byte1이 `ERR_NONE`으로 바뀐 응답을 clear ack로 사용합니다.
 - 중간 point가 유실된 trajectory를 이어 붙이지 않고, 상위 제어기는 최신 current position을 기준으로 새 trajectory를 생성해야 합니다.
+
+### Queue full 트러블슈팅
+
+`Queue Free=0` 또는 `ERR_QUEUE_FULL`이 발생하면 상위 제어기가 STM32의 소비 속도보다 빠르게 `0x101` frame을 전송하고 있는 상태입니다.
+
+1. 새 move frame 전송을 중지합니다.
+2. 기존 queue가 실행되어 `Queue Free`가 증가하는지 status(`0x201`)로 확인합니다.
+3. `0x030 Clear Error`를 전송하고 `ERR_QUEUE_FULL` 해제를 확인합니다.
+4. Queue full 시 drop된 frame이 있을 수 있으므로, 끊긴 trajectory를 그대로 이어 보내지 말고 최신 current position(`0x301`) 기준으로 trajectory를 다시 생성합니다.
+
+`Queue Free`가 계속 증가하지 않으면 모터 enable, homing/limit 상태, 치명적 error, 그리고 각 point를 Motor ID `0 -> 1 -> 2 -> 3` 순서의 4개 frame으로 완성해서 보내고 있는지 확인합니다.
 
 Board1 staging 규칙:
 
