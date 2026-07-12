@@ -38,6 +38,8 @@ setup(
     entry_points={
         'console_scripts': [
             'mission_manager_node = mission_manager.mission_manager_node:main',
+            'ready_and_approach_coordinator = '
+            'mission_manager.ready_and_approach_coordinator:main',
             'send_mission = mission_manager.send_mission:main',
             'send_demo_mission = mission_manager.send_demo_mission:main',
         ],

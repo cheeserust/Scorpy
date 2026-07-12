@@ -3,15 +3,15 @@ points:
   "4":
     dock:
       frame_id: map
-      x: 3.748
-      y: -18.219
-      yaw: 0.0
+      x: 2.98
+      y: -14.10
+      yaw: -3.04
 
     home:
       frame_id: map
-      x: 3.748
-      y: -18.219
-      yaw: 0.0
+      x: 2.98
+      y: -14.10
+      yaw: -3.04
 
     elevator_front:
       frame_id: map
@@ -46,8 +46,8 @@ points:
 
     elevator_front:
       frame_id: map
-      x: 15.771
-      y: 2.634
+      x: 14.93
+      y: 1.90
       yaw: 0.0
 
     "501":
@@ -58,9 +58,9 @@ points:
 
     object_place:
       frame_id: map
-      x: 6.318
-      y: 1.524
-      yaw: 0.0
+      x: 2.84
+      y: 1.17
+      yaw: 0.109
 
 locations:
   # Legacy aliases that are still convenient for mission goals.
@@ -95,7 +95,7 @@ locations:
 
   elevator_call_button_4f:
     floor: 4
-    marker_id: 20
+    marker_id: 50
     type: button_target
 
   elevator_door_4f:
@@ -128,7 +128,7 @@ locations:
 
   elevator_button_5f:
     floor: 4
-    marker_id: -1
+    marker_id: 52
     type: button_target
     extra:
       button_floor: 5
@@ -157,7 +157,7 @@ locations:
 
   elevator_call_button_5f:
     floor: 5
-    marker_id: 20
+    marker_id: 53
     type: button_target
 
   elevator_door_5f:
@@ -181,7 +181,7 @@ locations:
 
   elevator_button_4f:
     floor: 5
-    marker_id: -1
+    marker_id: 51
     type: button_target
     extra:
       button_floor: 4

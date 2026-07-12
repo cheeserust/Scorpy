@@ -1,14 +1,29 @@
 mission:
-  name: final_4f_5f_elevator_mission
+  name: final_402_to_5f_delivery_and_return
 
-  # Final scenario:
-  # 4F HOME -> 4F Elevator Front -> call elevator -> board elevator
-  # -> 5F floor check -> exit elevator -> map switch -> target
-  # -> 5F Elevator Front -> board elevator -> 4F floor check
-  # -> exit elevator -> map switch -> HOME.
-  #
-  # DONE is emitted by mission_manager after the last step succeeds.
+  # PDF final scenario, executed from one /mission/execute goal.
+  # The GUI default pickup is 402 and RETURN_HOME resolves to the selected
+  # pickup location, so the fixed demo is 402 -> object_place -> 402.
   steps:
+    - state: ARM_HOMING
+      task: homing
+      target: robot_arm
+      location: "$pickup_location"
+
+    - state: ARM_READY_AT_PICKUP
+      task: arm_execute
+      target: robot_arm
+      location: "$pickup_location"
+      extra:
+        arm_task_name: arm_ready
+
+    - state: PICK_OBJECT_TO_TRAY
+      task: arm_execute
+      target: "$object_label"
+      location: "$pickup_location"
+      extra:
+        arm_task_name: pickup_object_1_to_tray
+
     - state: GO_TO_ELEVATOR_FRONT
       task: go_to
       target: elevator_front
@@ -19,8 +34,8 @@ mission:
       target: elevator_panel_4f
       location: elevator_panel_4f
       extra:
-        tag_pose_topic: /tag_pose
-        cmd_vel_topic: /cmd_vel
+        target_distance_m: 1.37
+        target_lateral_m: 0.0
 
     - state: PRESS_ELEVATOR_CALL_BUTTON
       task: press_button
@@ -29,6 +44,26 @@ mission:
       extra:
         button_role: elevator_call
 
+    # This action starts arm_ready immediately and starts the 27 cm base move
+    # two seconds later. Both children must succeed before rotation begins.
+    - state: READY_AND_APPROACH_ELEVATOR_4F
+      task: ready_and_approach
+      target: elevator_door_4f
+      location: elevator_door_4f
+      extra:
+        arm_task_name: arm_ready
+        arm_start_to_drive_delay_sec: 2.0
+        distance_m: 0.27
+        speed_mps: 0.15
+
+    - state: FACE_ELEVATOR_4F
+      task: base_rotate
+      target: left
+      location: elevator_door_4f
+      extra:
+        angle_deg: 80.0
+
+    # Preserve the driving team's LiDAR-based door-open gate.
     - state: WAIT_ELEVATOR_OPEN
       task: wait_door_open
       target: elevator_door_4f
@@ -41,8 +76,7 @@ mission:
       target: elevator_board
       location: inside_elevator_4f
       extra:
-        mode: enter_elevator
-        localization_mode: aruco_odom
+        target_distance_cm: 35.0
 
     - state: PRESS_5F_BUTTON
       task: press_button
@@ -58,16 +92,13 @@ mission:
       location: floor_5_marker
       extra:
         expected_floor: 5
-        floor_topic: /tag/floor_id
 
     - state: EXIT_ELEVATOR
       task: exit_elevator
       target: elevator_exit_5f
       location: floor_5_marker
-      extra:
-        mode: exit_elevator
-        localization_mode: aruco_odom
 
+    # Pinky map switching is intentionally after physical exit.
     - state: SWITCH_5F_MAP
       task: map_switch
       target: map_5f
@@ -78,7 +109,14 @@ mission:
       target: "$delivery_location"
       location: "$delivery_location"
 
-    - state: ARM_TASK_AT_TARGET
+    - state: ROTATE_AT_DELIVERY
+      task: base_rotate
+      target: left
+      location: "$delivery_location"
+      extra:
+        angle_deg: 180.0
+
+    - state: DELIVER_OBJECT_FROM_TRAY
       task: arm_execute
       target: "$delivery_location"
       location: "$delivery_location"
@@ -96,8 +134,8 @@ mission:
       target: elevator_panel_5f
       location: elevator_panel_5f
       extra:
-        tag_pose_topic: /tag_pose
-        cmd_vel_topic: /cmd_vel
+        target_distance_m: 1.37
+        target_lateral_m: 0.0
 
     - state: PRESS_ELEVATOR_CALL_BUTTON_RETURN
       task: press_button
@@ -106,6 +144,24 @@ mission:
       extra:
         button_role: elevator_call
 
+    - state: READY_AND_APPROACH_ELEVATOR_5F
+      task: ready_and_approach
+      target: elevator_door_5f
+      location: elevator_door_5f
+      extra:
+        arm_task_name: arm_ready
+        arm_start_to_drive_delay_sec: 2.0
+        distance_m: 0.27
+        speed_mps: 0.15
+
+    - state: FACE_ELEVATOR_5F
+      task: base_rotate
+      target: left
+      location: elevator_door_5f
+      extra:
+        angle_deg: 80.0
+
+    # Preserve the driving team's LiDAR-based door-open gate.
     - state: WAIT_ELEVATOR_OPEN_RETURN
       task: wait_door_open
       target: elevator_door_5f
@@ -118,8 +174,7 @@ mission:
       target: elevator_board
       location: inside_elevator_5f
       extra:
-        mode: enter_elevator
-        localization_mode: aruco_odom
+        target_distance_cm: 35.0
 
     - state: PRESS_4F_BUTTON
       task: press_button
@@ -135,15 +190,11 @@ mission:
       location: floor_4_marker
       extra:
         expected_floor: 4
-        floor_topic: /tag/floor_id
 
     - state: EXIT_ELEVATOR_RETURN
       task: exit_elevator
       target: elevator_exit_4f
       location: floor_4_marker
-      extra:
-        mode: exit_elevator
-        localization_mode: aruco_odom
 
     - state: SWITCH_4F_MAP
       task: map_switch
@@ -152,5 +203,5 @@ mission:
 
     - state: RETURN_HOME
       task: go_to
-      target: home
-      location: home
+      target: "$pickup_location"
+      location: "$pickup_location"

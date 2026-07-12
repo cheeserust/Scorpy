@@ -4,7 +4,7 @@ import os
 from setuptools import find_packages, setup
 
 
-package_name = 'arm_task_server'
+package_name = 'vicpinky_nav_adapter'
 
 setup(
     name=package_name,
@@ -30,14 +30,17 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='sj',
-    maintainer_email='seongjun000313@gmail.com',
-    description='Semantic arm task action servers for VicPinky missions',
+    maintainer='user',
+    maintainer_email='user@example.com',
+    description='RunTask to Nav2 NavigateToPose adapter for VicPinky',
     license='TODO',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'arm_task_server_node = arm_task_server.arm_task_server_node:main',
+            (
+                'nav_adapter_node = '
+                'vicpinky_nav_adapter.nav_adapter_node:main'
+            ),
         ],
     },
 )

@@ -39,7 +39,7 @@ arm_can_bridge:
 
     # 실제 구동 전 MoveIt URDF/joint_limits.yaml 값과 동일해야 한다.
     arm_min_positions_rad:
-      - -1.48352986   # arm_joint_1: -85 deg
+      - -1.50970980   # arm_joint_1: include -86.5 deg homing reference
       - -1.36310215   # arm_joint_2: -78.1 deg
       - -1.59697627   # arm_joint_3: -91.5 deg
       - -1.57079633   # base_joint: -90 deg
@@ -69,6 +69,12 @@ arm_can_bridge:
       - 0.0
       - 0.0
       - 0.0
+
+    # Firmware가 실제 0x101/0x102 target으로 허용하는 0.01도 정수 범위다.
+    # ROS/MoveIt 표현 범위와 별도로, sign/offset 변환 후 모든 CAN 목표를 검사한다.
+    # 순서: arm_joint_1, arm_joint_2, arm_joint_3, base_joint, arm_joint_4.
+    arm_command_min_angle_raw: [-8500, -7810, -9150, -9000, -9000]
+    arm_command_max_angle_raw: [9000, 8000, 9000, 18000, 9000]
 
     # 제어하지 않는 URDF joint가 있을 때 /joint_states에 고정값으로 추가한다.
     fixed_joint_state_names: []
@@ -142,12 +148,17 @@ arm_can_bridge:
     arm_speed_raw: 0
 
     # Board1은 0x101 motor0~3 frame을 짧은 시간 안에 staging한다.
-    # STM firmware staging timeout이 80 ms이므로 MCP2515 RX 여유를 위해 7 ms gap을 둔다.
+    # 제공된 7월11 firmware staging timeout은 100 ms이며 7 ms gap을 유지한다.
     arm_inter_frame_delay_ms: 7.0
 
     # Board1/2 trajectory point 하나의 duration byte다.
-    # 4 ticks = 20 ms이며, 긴 목표 이동은 작은 absolute point 여러 개로 보간한다.
-    arm_trajectory_point_duration_ticks: 4
+    # 7 ms gap에서 통합 5-frame batch 시작 간격은 약 35 ms이므로 8 ticks(40 ms)를 쓴다.
+    arm_trajectory_point_duration_ticks: 8
+    arm_trajectory_min_duration_ticks: 8
+
+    # 기계 home의 J1=-86.5도는 command min=-85도 밖이다. Home 서비스 안에서
+    # 일반 보간 없이 단일 Board1 batch로 -85도까지 이탈한다(60 ticks = 300 ms).
+    arm_post_home_escape_duration_ticks: 60
 
     # STM queue를 전부 채우지 않고 이 point 수만큼만 앞서 전송한다.
     # Board1 point 1개는 4 frame이므로 4 point = 16 frame ahead다.
@@ -198,4 +209,6 @@ arm_can_bridge:
     joint_state_rate_hz: 50.0
 
     control_wait_timeout_ms: 3000
+    # Mechanical homing can take much longer than enable/clear-error commands.
+    homing_wait_timeout_ms: 120000
     status_publish_period_ms: 500

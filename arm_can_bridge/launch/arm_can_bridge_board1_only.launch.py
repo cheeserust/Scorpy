@@ -50,7 +50,7 @@ def generate_launch_description():
                     'arm_board_ids': [1, 1, 1, 1],
                     'arm_motor_ids': [0, 1, 2, 3],
                     'arm_min_positions_rad': [
-                        -1.48352986,
+                        -1.50970980,
                         -1.36310215,
                         -1.59697627,
                         -1.57079633,
@@ -74,6 +74,12 @@ def generate_launch_description():
                         0.0,
                         0.0,
                     ],
+                    'arm_command_min_angle_raw': [
+                        -8500, -7810, -9150, -9000,
+                    ],
+                    'arm_command_max_angle_raw': [
+                        9000, 8000, 9000, 18000,
+                    ],
                     'fixed_joint_state_names': [
                         'arm_joint_4',
                     ],
@@ -83,7 +89,8 @@ def generate_launch_description():
                     'required_homing_mask': 0x0F,
                     'queue_capacity': 28,
                     'board1_queue_capacity': 124,
-                    'arm_trajectory_point_duration_ticks': 4,
+                    'arm_trajectory_point_duration_ticks': 8,
+                    'arm_trajectory_min_duration_ticks': 8,
                     'arm_max_ahead_points': 4,
                     'packed_position_feedback_board_ids': [1],
                     'axis_status_flags_board_ids': [1],

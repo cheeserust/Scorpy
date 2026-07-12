@@ -103,8 +103,8 @@ def test_points_are_expanded_to_mission_locations(tmp_path):
             pickup_location='room_402',
             delivery_location='object_place',
             target_floor=5,
-            object_label='box',
-            arm_task_name='pick_object_2',
+            object_label='object_1',
+            arm_task_name='deliver_object_1_from_tray',
         )
     )
 
@@ -211,8 +211,8 @@ def test_project_config_matches_driving_team_task_servers():
             pickup_location='room_402',
             delivery_location='object_place',
             target_floor=5,
-            object_label='box',
-            arm_task_name='pick_object_2',
+            object_label='object_1',
+            arm_task_name='deliver_object_1_from_tray',
         )
     )
 
@@ -224,22 +224,54 @@ def test_project_config_matches_driving_team_task_servers():
     assert by_state['GO_TO_ELEVATOR_FRONT'].server == '/nav/go_to'
     assert by_state['ENTER_ELEVATOR'].task_id == 'board_elevator'
     assert by_state['ENTER_ELEVATOR'].server == '/elevator/board'
+    assert by_state['WAIT_ELEVATOR_OPEN'].task_id == 'wait_door_open'
+    assert by_state['WAIT_ELEVATOR_OPEN'].server == (
+        '/elevator/wait_door_open'
+    )
+    assert json.loads(
+        by_state['WAIT_ELEVATOR_OPEN'].extra_json
+    )['scan_topic'] == '/scan_filtered'
     assert by_state['EXIT_ELEVATOR'].task_id == 'exit_elevator'
     assert by_state['EXIT_ELEVATOR'].server == '/elevator/exit'
     assert by_state['EXIT_ELEVATOR'].target_floor == 5
     assert by_state['EXIT_ELEVATOR'].marker_id == 5
     assert by_state['RETURN_TO_ELEVATOR'].target_name == 'elevator_front'
     assert by_state['ENTER_ELEVATOR_RETURN'].task_id == 'board_elevator'
+    assert by_state['WAIT_ELEVATOR_OPEN_RETURN'].server == (
+        '/elevator/wait_door_open'
+    )
     assert by_state['EXIT_ELEVATOR_RETURN'].target_floor == 4
     assert by_state['EXIT_ELEVATOR_RETURN'].marker_id == 4
     assert by_state['WAIT_5F'].marker_id == 5
     assert by_state['WAIT_4F'].marker_id == 4
-    assert by_state['ARM_TASK_AT_TARGET'].server == '/arm/execute'
+    assert by_state['ARM_HOMING'].server == '/arm/homing'
+    assert by_state['PICK_OBJECT_TO_TRAY'].server == '/arm/execute'
+    assert by_state['DELIVER_OBJECT_FROM_TRAY'].server == '/arm/execute'
     assert json.loads(
-        by_state['ARM_TASK_AT_TARGET'].extra_json
-    )['arm_task_name'] == 'pick_object_2'
+        by_state['DELIVER_OBJECT_FROM_TRAY'].extra_json
+    )['arm_task_name'] == 'deliver_object_1_from_tray'
+    assert by_state['PRESS_ELEVATOR_CALL_BUTTON'].marker_id == 50
+    assert by_state['PRESS_ELEVATOR_CALL_BUTTON_RETURN'].marker_id == 53
+    assert by_state['PRESS_5F_BUTTON'].marker_id == 52
+    assert by_state['PRESS_4F_BUTTON'].marker_id == 51
+    assert json.loads(
+        by_state['ALIGN_ELEVATOR_TAG'].extra_json
+    )['target_distance_m'] == 1.37
+    assert json.loads(
+        by_state['ENTER_ELEVATOR'].extra_json
+    )['target_distance_cm'] == 35.0
+    assert by_state['READY_AND_APPROACH_ELEVATOR_4F'].server == (
+        '/mission/ready_and_approach'
+    )
+    assert by_state['RETURN_HOME'].target_name == '402'
 
     states = [step.state for step in plan]
+    assert states.index('FACE_ELEVATOR_4F') < states.index(
+        'WAIT_ELEVATOR_OPEN'
+    ) < states.index('ENTER_ELEVATOR')
+    assert states.index('FACE_ELEVATOR_5F') < states.index(
+        'WAIT_ELEVATOR_OPEN_RETURN'
+    ) < states.index('ENTER_ELEVATOR_RETURN')
     assert states.index('SWITCH_5F_MAP') > states.index('EXIT_ELEVATOR')
     assert states.index('SWITCH_4F_MAP') > states.index(
         'EXIT_ELEVATOR_RETURN'

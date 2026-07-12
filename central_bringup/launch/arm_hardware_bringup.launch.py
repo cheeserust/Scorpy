@@ -101,10 +101,6 @@ def _launch_setup(context):
     can_interface = LaunchConfiguration('can_interface')
     use_rviz = LaunchConfiguration('use_rviz')
     return [
-        _include(
-            'roscue_arm_moveit_config',
-            'static_virtual_joint_tfs.launch.py',
-        ),
         _include('roscue_arm_moveit_config', 'rsp.launch.py'),
         _include('roscue_arm_moveit_config', 'move_group.launch.py'),
         _include(

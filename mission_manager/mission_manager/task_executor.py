@@ -43,6 +43,14 @@ class TaskExecutor:
 
         return self._clients[server_name]
 
+    def missing_servers(self, steps) -> list[str]:
+        """Return unique child action names that are not currently ready."""
+        missing = []
+        for server_name in dict.fromkeys(step.server for step in steps):
+            if not self._get_client(server_name).server_is_ready():
+                missing.append(server_name)
+        return missing
+
     def _cancel_child_goal(
         self,
         child_goal_handle,
@@ -63,6 +71,31 @@ class TaskExecutor:
             self._node.get_logger().warning(
                 f'Failed to cancel child goal: {exc}'
             )
+
+    def _cancel_late_child_goal(
+        self,
+        send_goal_future,
+        server_name: str,
+    ) -> None:
+        """Cancel a child that is accepted after its parent stops waiting."""
+        def cancel_when_available(completed_future):
+            try:
+                child_goal_handle = completed_future.result()
+                if (
+                    child_goal_handle is not None
+                    and child_goal_handle.accepted
+                ):
+                    child_goal_handle.cancel_goal_async()
+            except Exception as exc:
+                self._node.get_logger().warning(
+                    f'Failed to cancel late goal on {server_name}: {exc}'
+                )
+
+        if send_goal_future.done():
+            cancel_when_available(send_goal_future)
+            return
+
+        send_goal_future.add_done_callback(cancel_when_available)
 
     def execute(
         self,
@@ -135,7 +168,25 @@ class TaskExecutor:
         )
 
         while rclpy.ok() and not send_goal_future.done():
+            if mission_goal_handle.is_cancel_requested:
+                self._cancel_late_child_goal(
+                    send_goal_future,
+                    step.server,
+                )
+                return TaskExecutionResult(
+                    success=False,
+                    message=(
+                        f'Mission canceled while sending goal to '
+                        f'{step.server}'
+                    ),
+                    canceled=True,
+                )
+
             if time.monotonic() >= deadline:
+                self._cancel_late_child_goal(
+                    send_goal_future,
+                    step.server,
+                )
                 return TaskExecutionResult(
                     success=False,
                     message=(
@@ -147,7 +198,25 @@ class TaskExecutor:
 
             time.sleep(0.05)
 
-        child_goal_handle = send_goal_future.result()
+        if not send_goal_future.done():
+            self._cancel_late_child_goal(
+                send_goal_future,
+                step.server,
+            )
+            return TaskExecutionResult(
+                success=False,
+                message=(
+                    f'ROS shutdown while sending goal to {step.server}'
+                ),
+            )
+
+        try:
+            child_goal_handle = send_goal_future.result()
+        except Exception as exc:
+            return TaskExecutionResult(
+                success=False,
+                message=f'Goal request failed on {step.server}: {exc}',
+            )
 
         if child_goal_handle is None:
             return TaskExecutionResult(

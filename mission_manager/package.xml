@@ -9,6 +9,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>rclpy</depend>
+  <depend>action_msgs</depend>
   <depend>std_msgs</depend>
   <depend>vicpinky_interfaces</depend>
   <depend>ament_index_python</depend>

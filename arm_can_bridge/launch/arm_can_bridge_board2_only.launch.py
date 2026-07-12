@@ -59,10 +59,13 @@ def generate_launch_description():
                     'arm_raw_position_offsets_rad': [
                         0.0,
                     ],
+                    'arm_command_min_angle_raw': [-9000],
+                    'arm_command_max_angle_raw': [9000],
                     'queue_capacity': 28,
                     'board2_queue_capacity': 32,
                     'arm_speed_raw': 1000,
                     'arm_trajectory_point_duration_ticks': 10,
+                    'arm_trajectory_min_duration_ticks': 8,
                     'arm_max_ahead_points': 1,
                     'packed_position_feedback_board_ids': [2],
                     'axis_status_flags_board_ids': [2],

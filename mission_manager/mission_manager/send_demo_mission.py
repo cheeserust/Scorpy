@@ -12,11 +12,11 @@ def main():
     """
     demo_args = [
         '--mission-id', 'final_4f_5f_demo',
-        '--pickup-location', 'home',
+        '--pickup-location', '402',
         '--delivery-location', 'object_place',
         '--target-floor', '5',
-        '--object', 'box',
-        '--arm-task-name', 'pick_object_2',
+        '--object', 'object_1',
+        '--arm-task-name', 'deliver_object_1_from_tray',
     ]
 
     return send_mission_main(demo_args)

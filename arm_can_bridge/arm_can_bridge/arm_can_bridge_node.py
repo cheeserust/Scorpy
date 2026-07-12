@@ -108,6 +108,10 @@ class ArmCanBridgeNode(Node):
             int(self.get_parameter('control_wait_timeout_ms').value)
             / 1000.0
         )
+        self._homing_wait_timeout_s = (
+            int(self.get_parameter('homing_wait_timeout_ms').value)
+            / 1000.0
+        )
         self._arm_enabled = bool(
             self.get_parameter('enable_arm').value
         )
@@ -338,6 +342,7 @@ class ArmCanBridgeNode(Node):
         self.declare_parameter('board2_queue_capacity', 127)
         self.declare_parameter('required_homing_mask', 0x0F)
         self.declare_parameter('control_wait_timeout_ms', 3000)
+        self.declare_parameter('homing_wait_timeout_ms', 120000)
         self.declare_parameter('status_publish_period_ms', 500)
         self.declare_parameter('joint_states_topic', '/joint_states')
         self.declare_parameter('joint_state_rate_hz', 50.0)
@@ -349,9 +354,11 @@ class ArmCanBridgeNode(Node):
         self.declare_parameter('speed_raw', 0)
         self.declare_parameter('queue_wait_timeout_ms', 3000)
         self.declare_parameter('completion_grace_ms', 3000)
-        self.declare_parameter('arm_inter_frame_delay_ms', 3.0)
+        self.declare_parameter('arm_inter_frame_delay_ms', 7.0)
         self.declare_parameter('board3_inter_frame_delay_ms', 3.0)
-        self.declare_parameter('arm_trajectory_point_duration_ticks', 4)
+        self.declare_parameter('arm_trajectory_point_duration_ticks', 8)
+        self.declare_parameter('arm_trajectory_min_duration_ticks', 8)
+        self.declare_parameter('arm_post_home_escape_duration_ticks', 60)
         self.declare_parameter('arm_max_ahead_points', 4)
         self.declare_parameter('disable_on_trajectory_error', False)
         self.declare_parameter('start_position_tolerance_rad', 0.02)
@@ -393,7 +400,7 @@ class ArmCanBridgeNode(Node):
         )
         self.declare_parameter('arm_motor_ids', [0, 1, 2, 3, 0])
         self.declare_parameter('arm_min_positions_rad', [
-            -1.48352986,
+            -1.50970980,
             -1.36310215,
             -1.59697627,
             -1.57079633,
@@ -426,6 +433,20 @@ class ArmCanBridgeNode(Node):
             0.0,
             0.0,
             0.0,
+        ])
+        self.declare_parameter('arm_command_min_angle_raw', [
+            -8500,
+            -7810,
+            -9150,
+            -9000,
+            -9000,
+        ])
+        self.declare_parameter('arm_command_max_angle_raw', [
+            9000,
+            8000,
+            9000,
+            18000,
+            9000,
         ])
         self.declare_parameter(
             'fixed_joint_state_names',
@@ -598,6 +619,25 @@ class ArmCanBridgeNode(Node):
                 )
                 if label == 'arm'
                 else MAX_DURATION_TICKS
+            ),
+            min_segment_duration_ticks=(
+                int(
+                    self.get_parameter(
+                        'arm_trajectory_min_duration_ticks'
+                    ).value
+                )
+                if label == 'arm'
+                else 1
+            ),
+            command_min_angle_raw=(
+                self._list_parameter('arm_command_min_angle_raw', int)
+                if label == 'arm'
+                else None
+            ),
+            command_max_angle_raw=(
+                self._list_parameter('arm_command_max_angle_raw', int)
+                if label == 'arm'
+                else None
             ),
         )
         trajectory_streamer = TrajectoryStreamer(
@@ -1194,6 +1234,38 @@ class ArmCanBridgeNode(Node):
         self.get_logger().warning(response.message)
         return True
 
+    def _reserve_all_controllers(
+        self,
+        response: Trigger.Response,
+        operation: str,
+    ) -> tuple[TrajectoryControllerContext, ...] | None:
+        """Reserve every motion controller for one non-emergency operation."""
+        reserved: list[TrajectoryControllerContext] = []
+        for controller in self._controllers:
+            with controller.lock:
+                if controller.active:
+                    for previous in reserved:
+                        with previous.lock:
+                            previous.active = False
+                    response.success = False
+                    response.message = (
+                        f'{operation} rejected: '
+                        f'{controller.label} trajectory is active'
+                    )
+                    self.get_logger().warning(response.message)
+                    return None
+                controller.active = True
+                reserved.append(controller)
+        return tuple(reserved)
+
+    @staticmethod
+    def _release_controller_reservations(
+        reserved: Sequence[TrajectoryControllerContext],
+    ) -> None:
+        for controller in reserved:
+            with controller.lock:
+                controller.active = False
+
     def _handle_enable(
         self,
         request: Trigger.Request,
@@ -1204,6 +1276,20 @@ class ArmCanBridgeNode(Node):
         if self._reject_unless_hardware(response, 'Enable'):
             return response
 
+        reserved = self._reserve_all_controllers(response, 'Enable')
+        if reserved is None:
+            return response
+
+        try:
+            return self._handle_enable_reserved(response)
+        finally:
+            self._release_controller_reservations(reserved)
+
+    def _handle_enable_reserved(
+        self,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        """Enable boards while all controllers are reserved."""
         if not self._send_or_fail(
             pack_enable(True, board_id=BOARD_ID_ALL),
             response,
@@ -1266,6 +1352,20 @@ class ArmCanBridgeNode(Node):
         if self._reject_unless_hardware(response, 'Homing'):
             return response
 
+        reserved = self._reserve_all_controllers(response, 'Homing')
+        if reserved is None:
+            return response
+
+        try:
+            return self._handle_home_all_reserved(response)
+        finally:
+            self._release_controller_reservations(reserved)
+
+    def _handle_home_all_reserved(
+        self,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        """Home every board and move the arm into firmware command limits."""
         if not self._all_board_states_enabled():
             response.success = False
             response.message = self._format_status(
@@ -1300,11 +1400,34 @@ class ArmCanBridgeNode(Node):
                 and self._all_board_trajectories_complete()
                 and not self._any_board_state_error()
             ),
-            timeout_s=self._control_wait_timeout_s,
+            timeout_s=self._homing_wait_timeout_s,
         )
 
         if success:
             self._mark_all_commanded_positions_valid()
+            try:
+                escaped = self._execute_post_home_escape()
+            except (
+                TrajectoryConversionError,
+                TrajectoryStreamingError,
+                SocketCanTransportError,
+                ValueError,
+            ) as exc:
+                self._invalidate_all_commanded_positions()
+                response.success = False
+                response.message = self._format_status(
+                    'Homing reached but post-home escape failed: '
+                    f'{exc}'
+                )
+                self.get_logger().error(response.message)
+                return response
+
+            response.success = True
+            response.message = self._format_status(
+                'Homing and post-home escape confirmed'
+                if escaped else 'Homing confirmed; escape not required'
+            )
+            return response
 
         response.success = success
         response.message = self._format_status(
@@ -1322,6 +1445,20 @@ class ArmCanBridgeNode(Node):
         if self._reject_unless_hardware(response, 'Clear error'):
             return response
 
+        reserved = self._reserve_all_controllers(response, 'Clear error')
+        if reserved is None:
+            return response
+
+        try:
+            return self._handle_clear_error_reserved(response)
+        finally:
+            self._release_controller_reservations(reserved)
+
+    def _handle_clear_error_reserved(
+        self,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        """Clear board errors while all controllers are reserved."""
         if not self._send_or_fail(
             pack_clear_error(
                 ALL_MOTORS,
@@ -1342,6 +1479,39 @@ class ArmCanBridgeNode(Node):
             if success else 'Clear error timeout'
         )
         return response
+
+    def _execute_post_home_escape(self) -> bool:
+        """Run the single unsplit arm batch needed after mechanical homing."""
+        controller = self._arm_controller
+        if controller is None:
+            return False
+
+        initial_positions = controller.commanded_state.positions()
+        duration_ticks = int(
+            self.get_parameter('arm_post_home_escape_duration_ticks').value
+        )
+        batch = controller.trajectory_converter.build_command_limit_entry_batch(
+            initial_positions,
+            duration_ticks,
+        )
+        if batch is None:
+            return False
+
+        controller.commanded_state.start_trajectory(
+            initial_positions=initial_positions,
+            batches=(batch,),
+        )
+        controller.trajectory_streamer.stream((batch,))
+        controller.commanded_state.mark_positions_valid(
+            batch.target_positions_rad
+        )
+        controller.board_state.mark_commanded_position_valid()
+        self._mark_arm_feedback_positions(batch.target_positions_rad)
+        self.get_logger().info(
+            'Post-home command-limit escape completed: '
+            f'targets={list(batch.target_positions_rad)}'
+        )
+        return True
 
     def _handle_estop(
         self,

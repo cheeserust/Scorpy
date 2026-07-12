@@ -11,7 +11,7 @@ import yaml
 
 
 DEFAULT_FLOOR = 4
-DEFAULT_PICKUP_LOCATION = 'home'
+DEFAULT_PICKUP_LOCATION = '402'
 DEFAULT_DELIVERY_LOCATION = 'object_place'
 
 FALLBACK_LOCATION_FLOORS = {
@@ -57,8 +57,8 @@ class MissionClient(Node):
         mission_manager가 보내는 중간 진행 상황을 출력한다.
 
         예:
-          state=ARM_TASK_AT_TARGET
-          task=/arm/place
+          state=DELIVER_OBJECT_FROM_TRAY
+          task=/arm/execute
           progress=0.23
         """
         feedback = feedback_msg.feedback
@@ -300,16 +300,16 @@ def build_argument_parser():
     parser.add_argument(
         '--object',
         dest='object_label',
-        default='box',
+        default='object_1',
         help='Object label to pick'
     )
 
     parser.add_argument(
         '--arm-task-name',
-        default=None,
+        default='deliver_object_1_from_tray',
         help=(
             'Concrete roscue_arm_pick task key, for example '
-            'pick_object_2 or place_to_table'
+            'deliver_object_1_from_tray'
         )
     )
 

@@ -1,5 +1,6 @@
 """Unit tests for STM status normalization in the ROS bridge node."""
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -105,3 +106,67 @@ def test_plan_only_bridge_rejects_direct_trajectory_goal():
     )
 
     assert response == GoalResponse.REJECT
+
+
+def test_post_home_escape_streams_one_direct_batch_and_commits_target():
+    node = ArmCanBridgeNode.__new__(ArmCanBridgeNode)
+    batch = SimpleNamespace(target_positions_rad=(-1.48, -1.36))
+    commanded_state = SimpleNamespace(
+        positions=Mock(return_value=(-1.51, -1.36)),
+        start_trajectory=Mock(),
+        mark_positions_valid=Mock(),
+    )
+    converter = SimpleNamespace(
+        build_command_limit_entry_batch=Mock(return_value=batch),
+    )
+    streamer = SimpleNamespace(stream=Mock())
+    board_state = SimpleNamespace(mark_commanded_position_valid=Mock())
+    node._arm_controller = SimpleNamespace(
+        commanded_state=commanded_state,
+        trajectory_converter=converter,
+        trajectory_streamer=streamer,
+        board_state=board_state,
+    )
+    node.get_parameter = Mock(return_value=SimpleNamespace(value=60))
+    node._mark_arm_feedback_positions = Mock()
+    node.get_logger = Mock(return_value=Mock())
+
+    assert node._execute_post_home_escape() is True
+    converter.build_command_limit_entry_batch.assert_called_once_with(
+        (-1.51, -1.36),
+        60,
+    )
+    commanded_state.start_trajectory.assert_called_once_with(
+        initial_positions=(-1.51, -1.36),
+        batches=(batch,),
+    )
+    streamer.stream.assert_called_once_with((batch,))
+    commanded_state.mark_positions_valid.assert_called_once_with(
+        batch.target_positions_rad
+    )
+    board_state.mark_commanded_position_valid.assert_called_once_with()
+
+
+def test_control_reservation_rejects_when_a_controller_is_active():
+    node = ArmCanBridgeNode.__new__(ArmCanBridgeNode)
+    arm = SimpleNamespace(
+        label='arm',
+        active=False,
+        lock=threading.Lock(),
+    )
+    gripper = SimpleNamespace(
+        label='gripper',
+        active=True,
+        lock=threading.Lock(),
+    )
+    node._controllers = (arm, gripper)
+    node.get_logger = Mock(return_value=Mock())
+    response = SimpleNamespace(success=True, message='')
+
+    reserved = node._reserve_all_controllers(response, 'Homing')
+
+    assert reserved is None
+    assert arm.active is False
+    assert gripper.active is True
+    assert response.success is False
+    assert 'gripper trajectory is active' in response.message

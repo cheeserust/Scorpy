@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 from trajectory_msgs.msg import JointTrajectory
 
 from .can_protocol import (
+    angle_raw_to_rad,
     BOARD3_TARGET_LOAD_MAX,
     BOARD_ID_BOARD1,
     BOARD_ID_BOARD3,
@@ -71,6 +72,9 @@ class ArmTrajectoryConverter:
         raw_position_signs: Sequence[float] | None = None,
         raw_position_offsets_rad: Sequence[float] | None = None,
         max_segment_duration_ticks: int = MAX_DURATION_TICKS,
+        min_segment_duration_ticks: int = 1,
+        command_min_angle_raw: Sequence[int] | None = None,
+        command_max_angle_raw: Sequence[int] | None = None,
     ):
         self._joint_names = tuple(joint_names)
         self._board_ids = tuple(
@@ -117,6 +121,22 @@ class ArmTrajectoryConverter:
             start_position_tolerance_rad
         )
         self._max_segment_duration_ticks = int(max_segment_duration_ticks)
+        self._min_segment_duration_ticks = int(min_segment_duration_ticks)
+        if (command_min_angle_raw is None) != (command_max_angle_raw is None):
+            raise ValueError(
+                'command_min_angle_raw and command_max_angle_raw '
+                'must be configured together'
+            )
+        self._command_min_angle_raw = (
+            tuple(int(value) for value in command_min_angle_raw)
+            if command_min_angle_raw is not None
+            else None
+        )
+        self._command_max_angle_raw = (
+            tuple(int(value) for value in command_max_angle_raw)
+            if command_max_angle_raw is not None
+            else None
+        )
 
         self._validate_configuration()
 
@@ -203,6 +223,37 @@ class ArmTrajectoryConverter:
                 'max_segment_duration_ticks must be in range '
                 f'1..{MAX_DURATION_TICKS}'
             )
+        if not 1 <= self._min_segment_duration_ticks <= MAX_DURATION_TICKS:
+            raise ValueError(
+                'min_segment_duration_ticks must be in range '
+                f'1..{MAX_DURATION_TICKS}'
+            )
+        if self._min_segment_duration_ticks > self._max_segment_duration_ticks:
+            raise ValueError(
+                'min_segment_duration_ticks cannot exceed '
+                'max_segment_duration_ticks'
+            )
+
+        if self._command_min_angle_raw is not None:
+            if len(self._command_min_angle_raw) != count:
+                raise ValueError(
+                    'command_min_angle_raw length must match joint_names'
+                )
+            if len(self._command_max_angle_raw or ()) != count:
+                raise ValueError(
+                    'command_max_angle_raw length must match joint_names'
+                )
+            for index, minimum in enumerate(self._command_min_angle_raw):
+                maximum = self._command_max_angle_raw[index]
+                if not -(2**31) <= minimum <= (2**31 - 1):
+                    raise ValueError('command_min_angle_raw must fit int32')
+                if not -(2**31) <= maximum <= (2**31 - 1):
+                    raise ValueError('command_max_angle_raw must fit int32')
+                if minimum >= maximum:
+                    raise ValueError(
+                        'Invalid raw command limit for '
+                        f'{self._joint_names[index]}'
+                    )
 
         for index, minimum in enumerate(self._min_positions):
             maximum = self._max_positions[index]
@@ -363,6 +414,7 @@ class ArmTrajectoryConverter:
     def _split_duration_ticks(
         duration_ns: int,
         max_segment_duration_ticks: int = MAX_DURATION_TICKS,
+        min_segment_duration_ticks: int = 1,
     ) -> tuple[int, ...]:
         if duration_ns <= 0:
             raise TrajectoryConversionError(
@@ -372,6 +424,13 @@ class ArmTrajectoryConverter:
             raise TrajectoryConversionError(
                 'max_segment_duration_ticks must be in range '
                 f'1..{MAX_DURATION_TICKS}'
+            )
+        if not 1 <= int(min_segment_duration_ticks) <= int(
+            max_segment_duration_ticks
+        ):
+            raise TrajectoryConversionError(
+                'min_segment_duration_ticks must be in range '
+                '1..max_segment_duration_ticks'
             )
 
         total_ticks = math.ceil(
@@ -384,6 +443,39 @@ class ArmTrajectoryConverter:
             chunk = min(total_ticks, int(max_segment_duration_ticks))
             chunks.append(int(chunk))
             total_ticks -= chunk
+
+        minimum = int(min_segment_duration_ticks)
+        if len(chunks) == 1 and chunks[0] < minimum:
+            return (minimum,)
+
+        if len(chunks) > 1 and chunks[-1] < minimum:
+            original_total = sum(chunks)
+            chunk_count = len(chunks)
+            while (
+                chunk_count > 1
+                and original_total // chunk_count < minimum
+            ):
+                chunk_count -= 1
+
+            if chunk_count == 1:
+                if original_total > MAX_DURATION_TICKS:
+                    raise TrajectoryConversionError(
+                        'Cannot partition duration without a short CAN point'
+                    )
+                return (max(original_total, minimum),)
+
+            base, remainder = divmod(original_total, chunk_count)
+            chunks = [
+                base + (1 if index < remainder else 0)
+                for index in range(chunk_count)
+            ]
+            if any(
+                chunk < minimum or chunk > MAX_DURATION_TICKS
+                for chunk in chunks
+            ):
+                raise TrajectoryConversionError(
+                    'Cannot partition duration within CAN point limits'
+                )
 
         return tuple(chunks)
 
@@ -403,6 +495,34 @@ class ArmTrajectoryConverter:
         )
         return rad_to_angle_raw(firmware_position_rad)
 
+    def _position_rad_from_target_raw(
+        self,
+        joint_index: int,
+        target_raw: int,
+    ) -> float:
+        firmware_position_rad = angle_raw_to_rad(int(target_raw))
+        return (
+            firmware_position_rad
+            - self._raw_position_offsets_rad[joint_index]
+        ) / self._raw_position_signs[joint_index]
+
+    def _validate_command_target_raw(
+        self,
+        joint_index: int,
+        target_raw: int,
+    ) -> None:
+        if self._command_min_angle_raw is None:
+            return
+        minimum = self._command_min_angle_raw[joint_index]
+        maximum = self._command_max_angle_raw[joint_index]
+        if minimum <= target_raw <= maximum:
+            return
+        raise TrajectoryConversionError(
+            'CAN target exceeds firmware command limit for '
+            f'{self._joint_names[joint_index]}: raw={target_raw}, '
+            f'allowed=[{minimum}, {maximum}]'
+        )
+
     def _clamp_positions_to_limits(
         self,
         positions: Sequence[float],
@@ -420,6 +540,7 @@ class ArmTrajectoryConverter:
         target_positions: Sequence[float],
         duration_ticks: int,
         target_loads_raw: Sequence[int | None] | None = None,
+        included_board_ids: set[int] | None = None,
     ) -> tuple[CanFrame, ...]:
         ordered_frames: list[tuple[int, int, CanFrame]] = []
 
@@ -435,6 +556,13 @@ class ArmTrajectoryConverter:
                 index,
                 target_position,
             )
+            self._validate_command_target_raw(index, target_pos_raw)
+
+            if (
+                included_board_ids is not None
+                and board_id not in included_board_ids
+            ):
+                continue
 
             if board_id == BOARD_ID_BOARD3:
                 target_load = self._aux_raw_for_joint(index)
@@ -470,6 +598,62 @@ class ArmTrajectoryConverter:
                 ordered_frames,
                 key=lambda item: (item[0], item[1]),
             )
+        )
+
+    def build_command_limit_entry_batch(
+        self,
+        current_positions_rad: Sequence[float],
+        duration_ticks: int,
+    ) -> TrajectoryBatch | None:
+        """Build one unsplit batch that moves a homed arm into command limits."""
+        if self._command_min_angle_raw is None:
+            return None
+        if len(current_positions_rad) != len(self._joint_names):
+            raise TrajectoryConversionError(
+                'Current position length must match configured joints'
+            )
+        if not 1 <= int(duration_ticks) <= MAX_DURATION_TICKS:
+            raise TrajectoryConversionError(
+                f'Post-home escape duration must be 1..{MAX_DURATION_TICKS}'
+            )
+
+        targets = [float(value) for value in current_positions_rad]
+        if not all(math.isfinite(value) for value in targets):
+            raise TrajectoryConversionError(
+                'Current positions must contain only finite values'
+            )
+
+        included_board_ids: set[int] = set()
+        for index, position in enumerate(targets):
+            current_raw = self._target_raw_for_joint(index, position)
+            minimum = self._command_min_angle_raw[index]
+            maximum = self._command_max_angle_raw[index]
+            clamped_raw = min(max(current_raw, minimum), maximum)
+            if clamped_raw == current_raw:
+                continue
+            targets[index] = self._position_rad_from_target_raw(
+                index,
+                clamped_raw,
+            )
+            included_board_ids.add(self._board_ids[index])
+
+        if not included_board_ids:
+            return None
+
+        frames = self._build_frames(
+            targets,
+            int(duration_ticks),
+            included_board_ids=included_board_ids,
+        )
+        if not frames:
+            raise TrajectoryConversionError(
+                'Post-home escape produced no CAN frames'
+            )
+        return TrajectoryBatch(
+            source_point_index=-1,
+            duration_ticks=int(duration_ticks),
+            target_positions_rad=tuple(targets),
+            frames=frames,
         )
 
     def convert(
@@ -555,6 +739,7 @@ class ArmTrajectoryConverter:
             tick_chunks = self._split_duration_ticks(
                 segment_duration_ns,
                 self._max_segment_duration_ticks,
+                self._min_segment_duration_ticks,
             )
 
             total_ticks = sum(tick_chunks)

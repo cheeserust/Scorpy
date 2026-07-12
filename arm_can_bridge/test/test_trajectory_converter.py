@@ -611,6 +611,149 @@ def test_arm_segment_can_be_split_into_20_ms_absolute_points():
     assert frame_target(batches[-1].frames[0]) == rad_to_angle_raw(1.0)
 
 
+def test_seven_ms_arm_stream_retimes_points_to_at_least_40_ms():
+    converter = make_converter(
+        max_segment_duration_ticks=8,
+        min_segment_duration_ticks=8,
+    )
+
+    trajectory = JointTrajectory()
+    trajectory.joint_names = list(JOINT_NAMES)
+    trajectory.points = [
+        make_point((0.2, 0.2, 0.2, 0.2), 50_000_000)
+    ]
+
+    batches = converter.convert(
+        trajectory,
+        current_positions_rad=(0.0, 0.0, 0.0, 0.0),
+    )
+
+    assert [batch.duration_ticks for batch in batches] == [10]
+    assert frame_target(batches[-1].frames[0]) == rad_to_angle_raw(0.2)
+
+
+def test_short_moveit_segment_is_stretched_to_40_ms():
+    converter = make_converter(
+        max_segment_duration_ticks=8,
+        min_segment_duration_ticks=8,
+    )
+    trajectory = JointTrajectory()
+    trajectory.joint_names = list(JOINT_NAMES)
+    trajectory.points = [
+        make_point((0.1, 0.1, 0.1, 0.1), 20_000_000)
+    ]
+
+    batches = converter.convert(
+        trajectory,
+        current_positions_rad=(0.0, 0.0, 0.0, 0.0),
+    )
+
+    assert [batch.duration_ticks for batch in batches] == [8]
+
+
+def test_40_ms_partition_never_leaves_a_short_tail():
+    converter = make_converter(
+        max_segment_duration_ticks=8,
+        min_segment_duration_ticks=8,
+    )
+    trajectory = JointTrajectory()
+    trajectory.joint_names = list(JOINT_NAMES)
+    trajectory.points = [
+        make_point((0.2, 0.2, 0.2, 0.2), 85_000_000)
+    ]
+
+    batches = converter.convert(
+        trajectory,
+        current_positions_rad=(0.0, 0.0, 0.0, 0.0),
+    )
+
+    assert [batch.duration_ticks for batch in batches] == [9, 8]
+
+
+def test_raw_command_limits_reject_generated_target_before_send():
+    converter = ArmTrajectoryConverter(
+        joint_names=('arm_joint_1',),
+        board_ids=(2,),
+        motor_ids=(0,),
+        min_positions_rad=(math.radians(-90.0),),
+        max_positions_rad=(math.radians(90.0),),
+        command_min_angle_raw=(-8500,),
+        command_max_angle_raw=(9000,),
+    )
+    trajectory = JointTrajectory()
+    trajectory.joint_names = ['arm_joint_1']
+    trajectory.points = [
+        make_point((math.radians(-86.0),), 50_000_000)
+    ]
+
+    with pytest.raises(
+        TrajectoryConversionError,
+        match='firmware command limit',
+    ):
+        converter.convert(
+            trajectory,
+            current_positions_rad=(math.radians(-86.5),),
+        )
+
+
+def test_post_home_escape_is_one_board1_batch_at_exact_raw_boundary():
+    converter = ArmTrajectoryConverter(
+        joint_names=(
+            'arm_joint_1',
+            'arm_joint_2',
+            'arm_joint_3',
+            'base_joint',
+            'arm_joint_4',
+        ),
+        board_ids=(1, 1, 1, 1, 2),
+        motor_ids=(0, 1, 2, 3, 0),
+        min_positions_rad=(math.radians(-90.0),) * 5,
+        max_positions_rad=(math.radians(180.0),) * 5,
+        command_min_angle_raw=(-8500, -7810, -9150, -9000, -9000),
+        command_max_angle_raw=(9000, 8000, 9000, 18000, 9000),
+    )
+
+    batch = converter.build_command_limit_entry_batch(
+        (
+            math.radians(-86.5),
+            math.radians(-78.1),
+            math.radians(-91.5),
+            math.radians(-90.0),
+            math.radians(-90.0),
+        ),
+        duration_ticks=60,
+    )
+
+    assert batch is not None
+    assert batch.duration_ticks == 60
+    assert [frame.can_id for frame in batch.frames] == [0x101] * 4
+    assert [frame.data[0] for frame in batch.frames] == [
+        0x80, 0x81, 0x82, 0x83,
+    ]
+    assert [frame_target(frame) for frame in batch.frames] == [
+        -8500, -7810, -9150, -9000,
+    ]
+    assert all(frame.data[7] == 60 for frame in batch.frames)
+    assert rad_to_angle_raw(batch.target_positions_rad[0]) == -8500
+
+
+def test_post_home_escape_is_skipped_when_home_is_inside_raw_limits():
+    converter = ArmTrajectoryConverter(
+        joint_names=('arm_joint_4',),
+        board_ids=(2,),
+        motor_ids=(0,),
+        min_positions_rad=(math.radians(-90.0),),
+        max_positions_rad=(math.radians(90.0),),
+        command_min_angle_raw=(-9000,),
+        command_max_angle_raw=(9000,),
+    )
+
+    assert converter.build_command_limit_entry_batch(
+        (math.radians(-90.0),),
+        duration_ticks=60,
+    ) is None
+
+
 def test_clamps_out_of_limit_current_position_before_interpolation():
     converter = ArmTrajectoryConverter(
         joint_names=('arm_joint_3',),

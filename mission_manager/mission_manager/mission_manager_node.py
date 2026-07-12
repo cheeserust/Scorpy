@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import json
 import os
+import threading
 import time
 
 from ament_index_python.packages import (
@@ -120,6 +121,7 @@ class MissionManager(Node):
         )
 
         self.runtime_state = MissionRuntimeState.IDLE
+        self._mission_lock = threading.Lock()
         self.mission_active = False
         self.current_mission_id = ''
         self.current_state = MissionRuntimeState.IDLE.value
@@ -164,15 +166,72 @@ class MissionManager(Node):
                 'arm_task_name is required'
             )
             return GoalResponse.REJECT
-
-        if self.mission_active:
+        if goal_request.object_label.strip() != 'object_1':
             self.get_logger().warning(
                 f'Rejecting mission "{goal_request.mission_id}": '
-                'another mission is already active'
+                'the calibrated final scenario supports object_1 only'
+            )
+            return GoalResponse.REJECT
+        if int(goal_request.target_floor) != 5:
+            self.get_logger().warning(
+                f'Rejecting mission "{goal_request.mission_id}": '
+                'the final elevator scenario targets floor 5'
+            )
+            return GoalResponse.REJECT
+        if goal_request.pickup_location.strip() not in {
+            '402',
+            '402_4f',
+            'room_402',
+        }:
+            self.get_logger().warning(
+                f'Rejecting mission "{goal_request.mission_id}": '
+                'the calibrated pickup location is 402'
+            )
+            return GoalResponse.REJECT
+        if goal_request.delivery_location.strip() != 'object_place':
+            self.get_logger().warning(
+                f'Rejecting mission "{goal_request.mission_id}": '
+                'the calibrated delivery location is object_place'
             )
             return GoalResponse.REJECT
 
-        self.mission_active = True
+        with self._mission_lock:
+            if self.mission_active:
+                self.get_logger().warning(
+                    f'Rejecting mission "{goal_request.mission_id}": '
+                    'another mission is already active'
+                )
+                return GoalResponse.REJECT
+
+            try:
+                preflight_context = MissionContext(
+                    mission_id=goal_request.mission_id,
+                    pickup_location=goal_request.pickup_location,
+                    delivery_location=goal_request.delivery_location,
+                    target_floor=goal_request.target_floor,
+                    object_label=goal_request.object_label,
+                    arm_task_name=goal_request.arm_task_name,
+                )
+                preflight_plan = self.flow_loader.build_plan(
+                    preflight_context
+                )
+            except Exception as exc:
+                self.get_logger().error(
+                    f'Rejecting mission configuration: {exc}'
+                )
+                return GoalResponse.REJECT
+
+            missing_servers = self.task_executor.missing_servers(
+                preflight_plan
+            )
+            if missing_servers:
+                self.get_logger().warning(
+                    'Rejecting mission because child action servers are '
+                    'offline: ' + ', '.join(missing_servers)
+                )
+                return GoalResponse.REJECT
+
+            self.mission_active = True
 
         self.get_logger().info(
             f'Accept mission: '
@@ -647,7 +706,8 @@ class MissionManager(Node):
             return result
 
         finally:
-            self.mission_active = False
+            with self._mission_lock:
+                self.mission_active = False
 
 
 def main(args=None):
@@ -660,9 +720,12 @@ def main(args=None):
 
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -31,5 +31,11 @@ def generate_launch_description():
                     'action_servers.yaml',
                 ]),
             }],
-        )
+        ),
+        Node(
+            package='mission_manager',
+            executable='ready_and_approach_coordinator',
+            name='ready_and_approach_coordinator',
+            output='screen',
+        ),
     ])

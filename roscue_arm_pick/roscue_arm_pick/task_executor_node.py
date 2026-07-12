@@ -93,6 +93,7 @@ class TaskExecutorNode(Node):
         self._cancel_event = threading.Event()
         self._active_goal_handle = None
         self._active_downstream_goal = None
+        self._homing_active = False
         self._marker_observations: dict[int, MarkerObservation] = {}
         self._plan_only_arm_positions: list[float] | None = None
         self.last_object_task: dict[str, Any] | None = None
@@ -139,6 +140,16 @@ class TaskExecutorNode(Node):
         self.homing_client = self.create_client(
             Trigger,
             self.homing_service_name,
+            callback_group=self._callback_group,
+        )
+        self.enable_client = self.create_client(
+            Trigger,
+            self.enable_service_name,
+            callback_group=self._callback_group,
+        )
+        self.estop_client = self.create_client(
+            Trigger,
+            self.estop_service_name,
             callback_group=self._callback_group,
         )
 
@@ -218,9 +229,16 @@ class TaskExecutorNode(Node):
         self.declare_parameter('detection_topic', '/detected_marker')
         self.declare_parameter('target_frame', 'base_link')
         self.declare_parameter('planning_group', 'arm')
+        self.declare_parameter('grasp_planning_group', 'arm_grasp')
+        self.declare_parameter('button_planning_group', 'arm_button')
         self.declare_parameter('pose_link', 'gripper_base_link')
+        self.declare_parameter('grasp_pose_link', 'grasp_tcp_link')
+        self.declare_parameter('button_pose_link', 'button_contact_link')
         self.declare_parameter('move_action_name', '/move_action')
         self.declare_parameter('homing_service_name', '/arm_board/home_all')
+        self.declare_parameter('enable_service_name', '/arm_board/enable')
+        self.declare_parameter('estop_service_name', '/arm_board/estop')
+        self.declare_parameter('auto_enable_before_homing', True)
         self.declare_parameter('execution_mode', 'plan_only')
         self.declare_parameter('downstream_result_timeout_sec', 120.0)
         self.declare_parameter('use_orientation_constraint', False)
@@ -299,12 +317,33 @@ class TaskExecutorNode(Node):
         self.planning_group = str(
             self.get_parameter('planning_group').value
         )
+        self.grasp_planning_group = str(
+            self.get_parameter('grasp_planning_group').value
+        )
+        self.button_planning_group = str(
+            self.get_parameter('button_planning_group').value
+        )
         self.pose_link = str(self.get_parameter('pose_link').value)
+        self.grasp_pose_link = str(
+            self.get_parameter('grasp_pose_link').value
+        )
+        self.button_pose_link = str(
+            self.get_parameter('button_pose_link').value
+        )
         self.move_action_name = str(
             self.get_parameter('move_action_name').value
         )
         self.homing_service_name = str(
             self.get_parameter('homing_service_name').value
+        )
+        self.enable_service_name = str(
+            self.get_parameter('enable_service_name').value
+        )
+        self.estop_service_name = str(
+            self.get_parameter('estop_service_name').value
+        )
+        self.auto_enable_before_homing = bool(
+            self.get_parameter('auto_enable_before_homing').value
         )
         self.execution_mode = str(
             self.get_parameter('execution_mode').value
@@ -433,8 +472,19 @@ class TaskExecutorNode(Node):
         self._cancel_event.set()
         with self._state_lock:
             downstream = self._active_downstream_goal
+            homing_active = self._homing_active
         if downstream is not None:
             downstream.cancel_goal_async()
+        if homing_active:
+            if self.estop_client.service_is_ready():
+                self.estop_client.call_async(Trigger.Request())
+                self.get_logger().error(
+                    'Homing cancel requested arm-board emergency stop'
+                )
+            else:
+                self.get_logger().error(
+                    'Homing canceled but /arm_board/estop is unavailable'
+                )
         self.get_logger().warning('Arm task cancellation requested')
         return CancelResponse.ACCEPT
 
@@ -549,9 +599,11 @@ class TaskExecutorNode(Node):
                 future.add_done_callback(self._cancel_late_goal)
                 raise TaskCanceled(f'Canceled while waiting for {label}')
             if time.monotonic() >= deadline:
+                future.add_done_callback(self._cancel_late_goal)
                 raise TaskFailure(f'Timeout waiting for {label}')
             time.sleep(FUTURE_POLL_SEC)
         if not future.done():
+            future.add_done_callback(self._cancel_late_goal)
             raise TaskFailure(f'ROS shutdown while waiting for {label}')
         try:
             return future.result()
@@ -615,23 +667,48 @@ class TaskExecutorNode(Node):
         return response
 
     def _run_homing(self) -> None:
-        self.publish_phase('homing', 'Calling arm board homing', 0.1)
+        with self._state_lock:
+            self._homing_active = True
+        try:
+            if self.auto_enable_before_homing:
+                self.publish_phase('enable', 'Enabling all arm boards', 0.05)
+                self._call_trigger(
+                    self.enable_client,
+                    self.enable_service_name,
+                    'arm board enable service',
+                )
+            self.publish_phase('homing', 'Calling arm board homing', 0.1)
+            self._call_trigger(
+                self.homing_client,
+                self.homing_service_name,
+                'arm board homing service',
+            )
+            self.publish_phase('homing', 'Arm homing confirmed', 1.0)
+        finally:
+            with self._state_lock:
+                self._homing_active = False
+
+    def _call_trigger(
+        self,
+        client: Any,
+        service_name: str,
+        label: str,
+    ) -> None:
         deadline = time.monotonic() + 5.0
-        while not self.homing_client.wait_for_service(timeout_sec=0.2):
+        while not client.wait_for_service(timeout_sec=0.2):
             self._check_canceled()
             if time.monotonic() >= deadline:
                 raise TaskFailure(
-                    f'Homing service unavailable: {self.homing_service_name}'
+                    f'Service unavailable: {service_name}'
                 )
         response = self._wait_for_future(
-            self.homing_client.call_async(Trigger.Request()),
+            client.call_async(Trigger.Request()),
             self.downstream_result_timeout_sec,
-            'arm board homing service',
+            label,
         )
         if response is None or not response.success:
             message = response.message if response is not None else 'no response'
-            raise TaskFailure(f'Arm homing failed: {message}')
-        self.publish_phase('homing', response.message, 1.0)
+            raise TaskFailure(f'{label} failed: {message}')
 
     def run_task(self, task_name: str) -> None:
         """Run one concrete task, returning home only after normal success."""
@@ -644,18 +721,24 @@ class TaskExecutorNode(Node):
             0.0,
         )
 
-        if task_type == 'home':
-            self.go_named_arm_pose('home')
-            return
-        if task_type == 'named_arm_pose':
-            self.go_named_arm_pose(str(task['pose_name']))
-            return
+        start_pose = str(task.get('start_pose', 'home')).strip()
+        return_pose = str(task.get('return_pose', 'home')).strip()
+        if start_pose and start_pose.lower() != 'none':
+            self.go_named_arm_pose(start_pose)
 
-        self.go_named_arm_pose('home')
-        if task_type == 'press_button':
+        if task_type in {'home', 'named_arm_pose'}:
+            self.go_named_arm_pose(str(task.get('pose_name', 'home')))
+        elif task_type == 'named_arm_gripper_pose':
+            self.go_named_arm_pose(str(task['pose_name']))
+            self.send_named_gripper_pose(str(task['gripper_pose_name']))
+        elif task_type == 'press_button':
             self.execute_press_button(task)
         elif task_type == 'pick_to_fixed_place':
             self.execute_pick_to_fixed_place(task)
+        elif task_type == 'pick_to_named_place':
+            self.execute_pick_to_named_place(task)
+        elif task_type == 'transfer_named_pose':
+            self.execute_transfer_named_pose(task)
         elif task_type == 'pick_previous_to_fixed_place':
             self.execute_pick_previous_to_fixed_place(task)
         elif task_type == 'place_fixed':
@@ -664,8 +747,13 @@ class TaskExecutorNode(Node):
             raise TaskFailure(f'Unsupported task type: {task_type}')
 
         self._check_canceled()
-        self.publish_phase('return_home', 'Returning arm home', 0.95)
-        self.go_named_arm_pose('home')
+        if return_pose and return_pose.lower() != 'none':
+            self.publish_phase(
+                'return_pose',
+                f'Returning arm to {return_pose}',
+                0.95,
+            )
+            self.go_named_arm_pose(return_pose)
         self.publish_phase('complete', f'Completed task: {concrete}', 1.0)
 
     def go_named_arm_pose(self, name: str) -> None:
@@ -817,10 +905,26 @@ class TaskExecutorNode(Node):
             button_center.pose,
             button_cfg['retreat_offset'],
         )
-        self.plan_and_optionally_execute(pre_pose, 'button pre-press')
+        self.plan_and_optionally_execute(
+            pre_pose,
+            'button pre-press',
+            pose_link=self.button_pose_link,
+        )
         self.send_button_gripper_pose()
-        self.plan_and_optionally_execute(press_pose, 'button press')
-        self.plan_and_optionally_execute(retreat_pose, 'button retreat')
+        self.plan_and_optionally_execute(
+            press_pose,
+            'button press',
+            pose_link=self.button_pose_link,
+        )
+        self._wait_interruptibly(
+            float(button_cfg.get('press_hold_sec', 2.0)),
+            'button hold',
+        )
+        self.plan_and_optionally_execute(
+            retreat_pose,
+            'button retreat',
+            pose_link=self.button_pose_link,
+        )
 
     def execute_pick_to_fixed_place(self, task: Mapping[str, Any]) -> None:
         marker_id = int(task['marker_id'])
@@ -858,15 +962,22 @@ class TaskExecutorNode(Node):
             self.make_fixed_place_sequence(place_name)
         )
 
-        self.plan_and_optionally_execute(approach_pose, 'pick approach')
-        self.plan_and_optionally_execute(grasp_pose, 'pick grasp')
-        self.send_gripper_positions(
-            object_profile['gripper_close_rad'],
-            duration_sec=float(object_profile.get('duration_sec', 2.0)),
-            effort=float(object_profile.get('gripper_effort', 500)),
-            label=object_key,
+        self.plan_and_optionally_execute(
+            approach_pose,
+            'pick approach',
+            pose_link=self.grasp_pose_link,
         )
-        self.plan_and_optionally_execute(lift_pose, 'pick lift')
+        self.plan_and_optionally_execute(
+            grasp_pose,
+            'pick grasp',
+            pose_link=self.grasp_pose_link,
+        )
+        self.send_object_grip(object_key, object_profile)
+        self.plan_and_optionally_execute(
+            lift_pose,
+            'pick lift',
+            pose_link=self.grasp_pose_link,
+        )
         self.plan_and_optionally_execute(
             place_approach,
             f'place approach {place_name}',
@@ -884,6 +995,89 @@ class TaskExecutorNode(Node):
             'place_name': place_name,
             'observe_pose': task.get('observe_pose'),
         }
+
+    def execute_pick_to_named_place(self, task: Mapping[str, Any]) -> None:
+        marker_id = int(task['marker_id'])
+        self.go_observe_pose_if_configured(task)
+        self._clear_marker(marker_id)
+        marker_base = self.transform_marker_to_base(
+            self.check_marker(marker_id)
+        )
+        target_cfg = self.aruco_cfg['aruco_targets'][marker_id]
+        object_key = str(task.get('object_key', target_cfg['name']))
+        object_profile = self.gripper_cfg['objects'][object_key]
+        object_waypoints = self.waypoint_cfg['objects'][object_key]
+
+        self.go_named_arm_pose('ready')
+        self.send_named_gripper_pose('open')
+        corrected_marker = self.apply_pose_correction(marker_base)
+        approach_pose = self.make_offset_pose(
+            corrected_marker,
+            object_waypoints['approach_offset'],
+        )
+        grasp_pose = self.make_offset_pose(
+            corrected_marker,
+            object_waypoints['grasp_offset'],
+        )
+        lift_pose = self.make_offset_pose(
+            grasp_pose.pose,
+            object_waypoints['lift_offset'],
+        )
+        self.plan_and_optionally_execute(
+            approach_pose,
+            'pick approach',
+            pose_link=self.grasp_pose_link,
+        )
+        self.plan_and_optionally_execute(
+            grasp_pose,
+            'pick grasp',
+            pose_link=self.grasp_pose_link,
+        )
+        self.send_object_grip(object_key, object_profile)
+        self.plan_and_optionally_execute(
+            lift_pose,
+            'pick lift',
+            pose_link=self.grasp_pose_link,
+        )
+        self.go_named_arm_pose(str(task['place_pose_name']))
+        self.send_named_gripper_pose('open')
+
+    def execute_transfer_named_pose(self, task: Mapping[str, Any]) -> None:
+        object_key = str(task['object_key'])
+        object_profile = self.gripper_cfg['objects'][object_key]
+        self.send_named_gripper_pose('open')
+        self.go_named_arm_pose(str(task['pickup_pose_name']))
+        self.send_object_grip(object_key, object_profile)
+        self.go_named_arm_pose(str(task['delivery_pose_name']))
+        self.send_named_gripper_pose('open')
+
+    def send_object_grip(
+        self,
+        object_key: str,
+        object_profile: Mapping[str, Any],
+    ) -> None:
+        stages = object_profile.get('close_stages_rad')
+        if not stages:
+            stages = [object_profile['gripper_close_rad']]
+        effort = float(object_profile.get('gripper_effort', 700))
+        duration = float(object_profile.get('stage_duration_sec', 1.2))
+        for index, positions in enumerate(stages, start=1):
+            self.send_gripper_positions(
+                positions,
+                duration_sec=duration,
+                effort=effort,
+                label=f'{object_key}_stage_{index}',
+            )
+
+    def _wait_interruptibly(self, duration_sec: float, label: str) -> None:
+        deadline = time.monotonic() + max(0.0, duration_sec)
+        while True:
+            self._check_canceled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            time.sleep(min(FUTURE_POLL_SEC, remaining))
+        self.publish_status(f'Completed wait: {label}')
 
     def execute_pick_previous_to_fixed_place(
         self,
@@ -1090,8 +1284,9 @@ class TaskExecutorNode(Node):
         self,
         target_pose: PoseStamped,
         label: str,
+        pose_link: str | None = None,
     ) -> None:
-        trajectory = self.plan_pose(target_pose, label)
+        trajectory = self.plan_pose(target_pose, label, pose_link=pose_link)
         if not self.execute_plans:
             return
         self._execute_follow_trajectory(
@@ -1104,18 +1299,26 @@ class TaskExecutorNode(Node):
         self,
         target_pose: PoseStamped,
         label: str,
+        pose_link: str | None = None,
     ) -> JointTrajectory:
         self.validate_target_pose(target_pose, label)
+        active_pose_link = pose_link or self.pose_link
+        planning_group = self._planning_group_for_pose_link(active_pose_link)
         self.publish_phase(
             'planning',
             f'Planning {label}: '
             f'x={target_pose.pose.position.x:.3f}, '
             f'y={target_pose.pose.position.y:.3f}, '
-            f'z={target_pose.pose.position.z:.3f}',
+            f'z={target_pose.pose.position.z:.3f}, '
+            f'group={planning_group}, link={active_pose_link}',
             0.45,
         )
         goal = MoveGroup.Goal()
-        goal.request = self.make_motion_plan_request(target_pose)
+        goal.request = self.make_motion_plan_request(
+            target_pose,
+            pose_link=active_pose_link,
+            planning_group=planning_group,
+        )
         goal.planning_options = self.make_planning_options()
         response = self._send_action_goal(
             self.move_group_client,
@@ -1124,10 +1327,19 @@ class TaskExecutorNode(Node):
             wait_server_sec=self.move_action_wait_sec,
         )
         result = response.result
-        if result.error_code.val != 1:
+        error_code = result.error_code
+        if error_code.val != 1:
+            details = []
+            message = str(getattr(error_code, 'message', '')).strip()
+            source = str(getattr(error_code, 'source', '')).strip()
+            if message:
+                details.append(f'message={message}')
+            if source:
+                details.append(f'source={source}')
+            detail_text = f', {", ".join(details)}' if details else ''
             raise TaskFailure(
                 f'MoveGroup plan failed for {label}: '
-                f'error_code={result.error_code.val}'
+                f'error_code={error_code.val}{detail_text}'
             )
         trajectory = result.planned_trajectory.joint_trajectory
         if not trajectory.points:
@@ -1158,12 +1370,25 @@ class TaskExecutorNode(Node):
                 f'{self.max_goal_z_m:.3f}]'
             )
 
+    def _planning_group_for_pose_link(self, pose_link: str) -> str:
+        if pose_link == self.grasp_pose_link:
+            return self.grasp_planning_group
+        if pose_link == self.button_pose_link:
+            return self.button_planning_group
+        return self.planning_group
+
     def make_motion_plan_request(
         self,
         target_pose: PoseStamped,
+        pose_link: str | None = None,
+        planning_group: str | None = None,
     ) -> MotionPlanRequest:
+        active_pose_link = pose_link or self.pose_link
         request = MotionPlanRequest()
-        request.group_name = self.planning_group
+        request.group_name = (
+            planning_group
+            or self._planning_group_for_pose_link(active_pose_link)
+        )
         request.pipeline_id = 'ompl'
         request.planner_id = 'RRTConnectkConfigDefault'
         request.num_planning_attempts = self.planning_attempts
@@ -1190,7 +1415,7 @@ class TaskExecutorNode(Node):
         constraints.name = 'arm_task_pose_goal'
         position = PositionConstraint()
         position.header.frame_id = target_pose.header.frame_id
-        position.link_name = self.pose_link
+        position.link_name = active_pose_link
         position.weight = 1.0
         box = SolidPrimitive()
         box.type = SolidPrimitive.BOX
@@ -1202,7 +1427,7 @@ class TaskExecutorNode(Node):
         if self.use_orientation_constraint:
             orientation = OrientationConstraint()
             orientation.header.frame_id = target_pose.header.frame_id
-            orientation.link_name = self.pose_link
+            orientation.link_name = active_pose_link
             orientation.orientation = target_pose.pose.orientation
             orientation.absolute_x_axis_tolerance = (
                 self.orientation_tolerance_rad

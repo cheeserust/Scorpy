@@ -36,6 +36,18 @@
   <xacro:finger_2_base_link prefix=""/>
   <xacro:roscue_arm prefix=""/>
 
+  <!--
+    Mobile-platform mount measured in the final integration PDF.
+    The mobile robot owns base_link and publishes odom -> base_link; this
+    robot_state_publisher only adds the arm subtree below it.
+  -->
+  <link name="base_link"/>
+  <joint name="arm_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="arm_base_link"/>
+    <origin xyz="-0.295 0.075 0.665" rpy="0 0 0"/>
+  </joint>
+
   <!-- Mount joints (cross-assembly connections) -->
 
   <joint name="finger_1_base_joint" type="revolute">
@@ -210,9 +222,9 @@
   </ros2_control>
 
   <!--
-    RealSense wrist mount. The camera driver owns camera_link's optical-frame
-    children; robot_state_publisher only connects the camera to the arm.
-    Replace this provisional transform after measuring the physical mount.
+    RealSense wrist mount measured in the final integration PDF. The camera
+    driver owns camera_link's optical-frame children; robot_state_publisher
+    only connects the camera root to the arm.
   -->
   <link name="camera_link">
     <visual>
@@ -235,7 +247,26 @@
   <joint name="camera_mount_joint" type="fixed">
     <parent link="gripper_base_link"/>
     <child link="camera_link"/>
-    <origin xyz="0.0 0.0 0.07" rpy="0.0 0.0 0.0"/>
+    <origin xyz="0.0 -0.070 0.057" rpy="1.57079633 -1.57079633 0.0"/>
+  </joint>
+
+  <!-- Fixed button TCP: third-finger contact point from the final PDF. -->
+  <link name="button_contact_link"/>
+  <joint name="button_contact_joint" type="fixed">
+    <parent link="gripper_base_link"/>
+    <child link="button_contact_link"/>
+    <origin xyz="-0.073434 -0.044148 0.179650" rpy="0 0 0.52359878"/>
+  </joint>
+
+  <!--
+    Center of the three fingertip-joint origins at the configured closed
+    object pose. Pick targets use this TCP instead of the palm origin.
+  -->
+  <link name="grasp_tcp_link"/>
+  <joint name="grasp_tcp_joint" type="fixed">
+    <parent link="gripper_base_link"/>
+    <child link="grasp_tcp_link"/>
+    <origin xyz="0 0 0.134295" rpy="0 0 0"/>
   </joint>
 
 </robot>

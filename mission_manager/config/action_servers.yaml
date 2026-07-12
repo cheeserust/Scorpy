@@ -38,19 +38,31 @@ actions:
   arm_execute:
     server: /arm/execute
     task_id: arm_execute
-    timeout_sec: 120.0
+    timeout_sec: 240.0
     retry: 0
 
   press_button:
     server: /arm/press_button
     task_id: press_button
-    timeout_sec: 30.0
+    timeout_sec: 180.0
     retry: 0
 
   homing:
     server: /arm/homing
     task_id: homing
-    timeout_sec: 40.0
+    timeout_sec: 180.0
+    retry: 0
+
+  ready_and_approach:
+    server: /mission/ready_and_approach
+    task_id: ready_and_approach
+    timeout_sec: 90.0
+    retry: 0
+
+  base_rotate:
+    server: /base/rotate
+    task_id: rotate
+    timeout_sec: 30.0
     retry: 0
 
   wait_door_open:

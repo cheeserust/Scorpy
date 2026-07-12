@@ -1,8 +1,7 @@
 mission_allowed_tasks:
-  - pick_object_1
-  - pick_object_2
-  - place_to_robot
-  - place_to_table
+  - arm_ready
+  - pickup_object_1_to_tray
+  - deliver_object_1_from_tray
   - press_elevator_up
   - press_elevator_down
   - press_floor_4
@@ -10,87 +9,78 @@ mission_allowed_tasks:
 
 tasks:
   home:
-    type: "home"
+    type: named_arm_pose
+    pose_name: travel_stow
+    start_pose: none
+    return_pose: none
 
-  observe_robot_front_drop:
-    type: "named_arm_pose"
-    pose_name: "observe_robot_front_drop"
+  arm_ready:
+    type: named_arm_gripper_pose
+    pose_name: ready
+    gripper_pose_name: open
+    start_pose: none
+    return_pose: none
 
-  observe_elevator_buttons:
-    type: "named_arm_pose"
-    pose_name: "observe_elevator_buttons"
+  pickup_object_1_to_tray:
+    type: pick_to_named_place
+    marker_id: 54
+    object_key: object_1
+    observe_pose: observe_pickup_402
+    place_pose_name: tray_drop
+    start_pose: ready
+    return_pose: ready
+
+  deliver_object_1_from_tray:
+    type: transfer_named_pose
+    object_key: object_1
+    pickup_pose_name: tray_pick
+    delivery_pose_name: delivery_5f
+    start_pose: ready
+    return_pose: ready
 
   press_elevator_up:
-    type: "press_button"
+    type: press_button
     marker_id: 50
-    observe_pose: "observe_elevator_buttons"
+    observe_pose: observe_call_4f
+    start_pose: ready
+    # ready starts in parallel with the delayed base approach in the coordinator.
+    return_pose: none
 
   press_floor_4:
-    type: "press_button"
+    type: press_button
     marker_id: 51
-    observe_pose: "observe_elevator_buttons"
+    observe_pose: observe_cabin_4_button
+    start_pose: ready
+    return_pose: ready
 
   press_floor_5:
-    type: "press_button"
+    type: press_button
     marker_id: 52
-    observe_pose: "observe_elevator_buttons"
+    observe_pose: observe_cabin_5_button
+    start_pose: ready
+    return_pose: ready
 
   press_elevator_down:
-    type: "press_button"
+    type: press_button
     marker_id: 53
-    observe_pose: "observe_elevator_buttons"
+    observe_pose: observe_call_5f
+    start_pose: ready
+    return_pose: none
 
+  # Backward-compatible aliases for manual/debug commands.
   pick_object_1:
-    type: "pick_to_fixed_place"
-    marker_id: 54
-    object_key: "object_1"
-    place_name: "robot_front_drop"
-
-  pick_object_2:
-    type: "pick_to_fixed_place"
-    marker_id: 55
-    object_key: "object_2"
-    place_name: "robot_front_drop"
-    observe_pose: "observe_object_start"
-
-  place_to_robot:
-    type: "place_fixed"
-    place_name: "robot_front_drop"
-
-  place_to_table:
-    type: "pick_previous_to_fixed_place"
-    fallback_marker_id: 54
-    fallback_object_key: "object_1"
-    place_name: "left_table"
-
+    type: alias
+    target: pickup_object_1_to_tray
   pick_object_1_to_tray:
-    type: "pick_to_fixed_place"
-    marker_id: 54
-    object_key: "object_1"
-    place_name: "robot_tray"
-
-  pick_object_2_to_tray:
-    type: "pick_to_fixed_place"
-    marker_id: 55
-    object_key: "object_2"
-    place_name: "robot_tray"
-
-  pick_object_1_to_side_table:
-    type: "pick_to_fixed_place"
-    marker_id: 54
-    object_key: "object_1"
-    place_name: "side_table"
-
-  pick_object_2_to_side_table:
-    type: "pick_to_fixed_place"
-    marker_id: 55
-    object_key: "object_2"
-    place_name: "side_table"
-
+    type: alias
+    target: pickup_object_1_to_tray
+  place_to_table:
+    type: alias
+    target: deliver_object_1_from_tray
   press_4f:
-    type: "alias"
-    target: "press_floor_4"
-
+    type: alias
+    target: press_floor_4
   press_5f:
-    type: "alias"
-    target: "press_floor_5"
+    type: alias
+    target: press_floor_5
+

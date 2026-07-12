@@ -1,4 +1,4 @@
-"""Launch RealSense and ArUco detection on the robot-side computer."""
+"""Launch the wrist RealSense and ArUco detection on the central PC."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -10,7 +10,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    """Create the RPi-side camera and marker perception graph."""
+    """Create the central-PC camera and marker perception graph."""
     launch_camera = LaunchConfiguration('launch_camera')
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -32,6 +32,7 @@ def generate_launch_description():
             'camera_info_topic': '/camera/camera/color/camera_info',
             'marker_size_m': 0.05,
             'target_marker_ids': [50, 51, 52, 53, 54, 55],
+            'min_stable_frames': 3,
         }],
     )
     return LaunchDescription([

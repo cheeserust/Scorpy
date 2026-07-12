@@ -4,7 +4,7 @@
   <xacro:macro name="roscue_arm" params="prefix">
 
     <!-- Links -->
-    <link name="${prefix}base_link">
+    <link name="${prefix}arm_base_link">
       <inertial>
         <origin xyz="0.085592 -0.000006 0.033051" rpy="0 0 0"/>
         <mass value="2.059958"/>
@@ -138,7 +138,7 @@
 
     <!-- Joints (internal to assembly) -->
     <joint name="${prefix}base_joint" type="revolute">
-      <parent link="${prefix}base_link"/>
+      <parent link="${prefix}arm_base_link"/>
       <child link="${prefix}first_link"/>
       <origin xyz="0.000000 0.000000 0.027000" rpy="0.000000 -0.000000 0.000000"/>
       <axis xyz="0.000000 0.000000 -1.000000"/>
@@ -150,7 +150,7 @@
       <child link="${prefix}second_link"/>
       <origin xyz="-0.065000 0.000000 0.063000" rpy="0.000000 -1.570796 0.000000"/>
       <axis xyz="-0.000000 -0.000000 -1.000000"/>
-      <limit lower="-1.4835" upper="1.5708" effort="100.0" velocity="1.00"/>
+      <limit lower="-1.5097" upper="1.5708" effort="100.0" velocity="1.00"/>
     </joint>
 
     <joint name="${prefix}arm_joint_2" type="revolute">

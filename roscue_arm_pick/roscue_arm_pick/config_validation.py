@@ -12,6 +12,7 @@ import yaml
 
 LIMIT_TOLERANCE_RAD = 1e-3
 HOME_TOLERANCE_RAD = 1e-3
+ANGLE_RAW_PER_RADIAN = 18_000.0 / math.pi
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,46 @@ def _check_limit_source(
             )
 
 
+def _arm_command_raw_table(
+    errors: list[str],
+    params: Mapping[str, Any],
+    arm: Mapping[str, Mapping[str, float]],
+) -> dict[str, tuple[int, int]]:
+    """Return fail-closed post-transform CAN command limits by arm joint."""
+    names = [str(value) for value in params['arm_joint_names']]
+    minimums = params.get('arm_command_min_angle_raw')
+    maximums = params.get('arm_command_max_angle_raw')
+    if minimums is None or maximums is None:
+        errors.append('arm CAN command raw limits are missing')
+        return {}
+    if len(minimums) != len(names) or len(maximums) != len(names):
+        errors.append('arm CAN command raw limit arrays have wrong length')
+        return {}
+
+    result: dict[str, tuple[int, int]] = {}
+    for index, name in enumerate(names):
+        minimum = int(minimums[index])
+        maximum = int(maximums[index])
+        if not -(2**31) <= minimum <= (2**31 - 1):
+            errors.append(f'arm raw minimum for {name} does not fit int32')
+        if not -(2**31) <= maximum <= (2**31 - 1):
+            errors.append(f'arm raw maximum for {name} does not fit int32')
+        if minimum >= maximum:
+            errors.append(f'arm raw command limits are invalid for {name}')
+        if name not in arm:
+            errors.append(f'arm raw command limit has unknown joint {name}')
+        result[name] = (minimum, maximum)
+    return result
+
+
+def _position_to_command_raw(
+    position_rad: float,
+    bounds: Mapping[str, float],
+) -> int:
+    firmware_rad = bounds['sign'] * float(position_rad) + bounds['offset']
+    return int(round(firmware_rad * ANGLE_RAW_PER_RADIAN))
+
+
 def validate_configuration(
     *,
     fixed_config: Mapping[str, Any],
@@ -149,6 +190,7 @@ def validate_configuration(
     params = _bridge_parameters(bridge_config)
     arm = _joint_table(params, 'arm')
     gripper = _joint_table(params, 'gripper')
+    arm_command_raw = _arm_command_raw_table(errors, params, arm)
 
     expected_arm = [str(value) for value in fixed_config['joint_order']['arm']]
     expected_gripper = [
@@ -203,17 +245,63 @@ def validate_configuration(
                     float(raw_value),
                     arm[joint],
                 )
+                if pose_name == 'hardware_home_reference':
+                    continue
+                if joint in arm_command_raw:
+                    target_raw = _position_to_command_raw(
+                        float(raw_value),
+                        arm[joint],
+                    )
+                    minimum, maximum = arm_command_raw[joint]
+                    if not minimum <= target_raw <= maximum:
+                        errors.append(
+                            f'arm_pose.{pose_name}.{joint} raw={target_raw} '
+                            f'is outside CAN command [{minimum}, {maximum}]'
+                        )
 
-    fixed_home = fixed_config.get('arm_named_poses', {}).get('home', {})
+    arm_poses = fixed_config.get('arm_named_poses', {})
+    fixed_home = arm_poses.get(
+        'hardware_home_reference',
+        arm_poses.get('home', {}),
+    )
     for joint, raw_value in zip(
         expected_arm,
         fixed_home.get('positions_rad', []),
     ):
         if joint in arm and abs(float(raw_value) - arm[joint]['home']) > HOME_TOLERANCE_RAD:
             errors.append(
-                f'fixed home for {joint}={float(raw_value):.8f} does not '
+                f'fixed hardware home for {joint}={float(raw_value):.8f} does not '
                 f'match bridge home {arm[joint]["home"]:.8f}'
             )
+
+    escape_ticks = int(params.get('arm_post_home_escape_duration_ticks', 0))
+    if not 1 <= escape_ticks <= 0xFF:
+        errors.append('arm_post_home_escape_duration_ticks must be 1..255')
+
+    point_ticks = int(params.get('arm_trajectory_point_duration_ticks', 0))
+    min_point_ticks = int(params.get('arm_trajectory_min_duration_ticks', 0))
+    frame_gap_ms = float(params.get('arm_inter_frame_delay_ms', -1.0))
+    if frame_gap_ms < 0.0:
+        errors.append('arm_inter_frame_delay_ms cannot be negative')
+    if not 1 <= min_point_ticks <= point_ticks <= 0xFF:
+        errors.append(
+            'arm trajectory duration ticks must satisfy '
+            '1 <= minimum <= point <= 255'
+        )
+    elif point_ticks * 5.0 < len(arm) * frame_gap_ms:
+        errors.append(
+            'arm trajectory point duration is shorter than the '
+            'five-frame CAN serialization interval'
+        )
+
+    for joint, bounds in arm.items():
+        if joint not in arm_command_raw:
+            continue
+        home_raw = _position_to_command_raw(bounds['home'], bounds)
+        minimum, maximum = arm_command_raw[joint]
+        escape_raw = min(max(home_raw, minimum), maximum)
+        if not minimum <= escape_raw <= maximum:
+            errors.append(f'post-home escape is invalid for {joint}')
 
     gripper_home = fixed_config.get('gripper_named_poses', {}).get(
         'open',
@@ -238,6 +326,8 @@ def validate_configuration(
         gripper_profiles.append((f'named.{name}', pose.get('positions_rad', [])))
     for name, profile in gripper_config.get('objects', {}).items():
         gripper_profiles.append((f'object.{name}', profile.get('gripper_close_rad', [])))
+        for index, stage in enumerate(profile.get('close_stages_rad', [])):
+            gripper_profiles.append((f'object.{name}.stage_{index + 1}', stage))
     button_profile = gripper_config.get('buttons', {}).get('press_pose_rad')
     if button_profile is not None:
         gripper_profiles.append(('buttons.press', button_profile))

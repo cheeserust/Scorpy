@@ -38,10 +38,24 @@ from vicpinky_interfaces.msg import MissionStatus
 from werkzeug.serving import make_server
 import yaml
 
+from .saved_pose_store import (
+    SavedPoseNotFoundError,
+    SavedPoseStore,
+    SavedPoseStoreError,
+)
+
 
 BOARD3_TARGET_LOAD_MAX = 1023
 MANUAL_MIN_DURATION_SEC = 0.1
 MANUAL_MAX_DURATION_SEC = 30.0
+
+SEQUENCE_ACTIVE_STATES = {'STARTING', 'RUNNING', 'STOPPING'}
+ACTION_BLOCKING_STATES = {
+    'SENDING',
+    'SEND_TIMEOUT_PENDING',
+    'ACCEPTED',
+    'CANCELING',
+}
 
 BUTTON_PRESS_STATES = {
     'PRESS_5F_BUTTON': 5,
@@ -69,9 +83,14 @@ ELEVATOR_WAIT_FLOOR_STATES = {
 }
 
 ELEVATOR_FSM_STATES = (
+    'ARM_HOMING',
+    'ARM_READY_AT_PICKUP',
+    'PICK_OBJECT_TO_TRAY',
     'GO_TO_ELEVATOR_FRONT',
     'ALIGN_ELEVATOR_TAG',
     'PRESS_ELEVATOR_CALL_BUTTON',
+    'READY_AND_APPROACH_ELEVATOR_4F',
+    'FACE_ELEVATOR_4F',
     'WAIT_ELEVATOR_OPEN',
     'ENTER_ELEVATOR',
     'PRESS_5F_BUTTON',
@@ -79,10 +98,13 @@ ELEVATOR_FSM_STATES = (
     'EXIT_ELEVATOR',
     'SWITCH_5F_MAP',
     'GO_TO_TARGET_PLACE',
-    'ARM_TASK_AT_TARGET',
+    'ROTATE_AT_DELIVERY',
+    'DELIVER_OBJECT_FROM_TRAY',
     'RETURN_TO_ELEVATOR',
     'ALIGN_ELEVATOR_TAG_RETURN',
     'PRESS_ELEVATOR_CALL_BUTTON_RETURN',
+    'READY_AND_APPROACH_ELEVATOR_5F',
+    'FACE_ELEVATOR_5F',
     'WAIT_ELEVATOR_OPEN_RETURN',
     'ENTER_ELEVATOR_RETURN',
     'PRESS_4F_BUTTON',
@@ -103,8 +125,6 @@ MAP_SWITCH_STATES = {
 }
 
 SUCCESS_EVENT_NEXT_STATE_BY_STATE = {
-    'WAIT_ELEVATOR_OPEN': 'ENTER_ELEVATOR',
-    'WAIT_ELEVATOR_OPEN_RETURN': 'ENTER_ELEVATOR_RETURN',
     'SWITCH_5F_MAP': 'GO_TO_TARGET_PLACE',
     'SWITCH_4F_MAP': 'RETURN_HOME',
 }
@@ -113,9 +133,9 @@ SUCCESS_EVENT_NEXT_STATE_BY_TYPE_AND_STATE = {
     ('BUTTON_PRESS_SUCCESS', 'PRESS_5F_BUTTON'): 'WAIT_5F',
     ('BUTTON_PRESS_SUCCESS', 'PRESS_4F_BUTTON'): 'WAIT_4F',
     ('ELEVATOR_CALL_BUTTON_DONE', 'PRESS_ELEVATOR_CALL_BUTTON'):
-        'WAIT_ELEVATOR_OPEN',
+        'READY_AND_APPROACH_ELEVATOR_4F',
     ('ELEVATOR_CALL_BUTTON_DONE', 'PRESS_ELEVATOR_CALL_BUTTON_RETURN'):
-        'WAIT_ELEVATOR_OPEN_RETURN',
+        'READY_AND_APPROACH_ELEVATOR_5F',
     ('ELEVATOR_ENTERED', 'ENTER_ELEVATOR'): 'PRESS_5F_BUTTON',
     ('ELEVATOR_ENTERED', 'ENTER_ELEVATOR_RETURN'): 'PRESS_4F_BUTTON',
     ('TARGET_FLOOR_ARRIVED', 'WAIT_5F'): 'EXIT_ELEVATOR',
@@ -134,10 +154,10 @@ ARM_COMMANDS = {
 }
 
 ARM_TASK_OPTIONS = [
-    {'name': 'pick_object_1', 'label': 'Pick object 1'},
-    {'name': 'pick_object_2', 'label': 'Pick object 2'},
-    {'name': 'place_to_robot', 'label': 'Place to robot'},
-    {'name': 'place_to_table', 'label': 'Place to table'},
+    {
+        'name': 'deliver_object_1_from_tray',
+        'label': 'Object 1 (doll): tray to 5F',
+    },
 ]
 
 ARM_MANUAL_JOINTS = [
@@ -339,6 +359,32 @@ class VicPinkyGuiNode(Node):
         self._nav_result: dict[str, Any] | None = None
         self._nav_goal_handle = None
         self._manual_controllers = self._manual_controllers_from_parameters()
+        self._saved_pose_file = self._resolve_saved_pose_file(
+            str(self.get_parameter('saved_pose_file').value)
+        )
+        self._saved_pose_store: SavedPoseStore | None = None
+        self._saved_pose_store_error: str | None = None
+        try:
+            self._saved_pose_store = SavedPoseStore(self._saved_pose_file)
+        except SavedPoseStoreError as exc:
+            self._saved_pose_store_error = str(exc)
+            self.get_logger().error(
+                f'Failed to initialize saved pose store '
+                f'{self._saved_pose_file}: {exc}'
+            )
+        sequence_margin = float(
+            self.get_parameter('sequence_step_timeout_margin_sec').value
+        )
+        self._sequence_step_timeout_margin_s = (
+            sequence_margin
+            if math.isfinite(sequence_margin) and sequence_margin >= 0.0
+            else 5.0
+        )
+        self._sequence_state = self._idle_sequence_state()
+        self._sequence_thread: threading.Thread | None = None
+        self._sequence_stop_event = threading.Event()
+        self._sequence_cancel_lock = threading.Lock()
+        self._sequence_cancel_requested: set[str] = set()
 
         self._latest_arm_status_raw: str | None = None
         self._latest_arm_status_seen_at: float | None = None
@@ -562,6 +608,8 @@ class VicPinkyGuiNode(Node):
         self.declare_parameter('manual_arm_mode', 'full')
         self.declare_parameter('enable_manual_arm', True)
         self.declare_parameter('enable_manual_gripper', True)
+        self.declare_parameter('saved_pose_file', '')
+        self.declare_parameter('sequence_step_timeout_margin_sec', 5.0)
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('amcl_pose_topic', '/amcl_pose')
         self.declare_parameter('odom_topic', '/odom')
@@ -716,8 +764,93 @@ class VicPinkyGuiNode(Node):
 
         @app.post('/api/arm/<command>')
         def api_arm_command(command: str):
+            payload = request.get_json(silent=True)
+            if (
+                command == 'disable'
+                and (
+                    not isinstance(payload, dict)
+                    or payload.get('confirmed') is not True
+                )
+            ):
+                return jsonify({
+                    'ok': False,
+                    'command': command,
+                    'message': 'Disable requires confirmed=true',
+                }), 400
             response = self.call_arm_service(command)
             return jsonify(response), 200 if response.get('ok') else 503
+
+        @app.get('/api/manual/poses')
+        def api_saved_poses():
+            response = self.saved_poses_snapshot()
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
+
+        @app.post('/api/manual/poses')
+        def api_create_saved_pose():
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                payload = {}
+            response = self.create_saved_pose(payload)
+            status_code = 201 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
+
+        @app.get('/api/manual/poses/<int:pose_id>')
+        def api_get_saved_pose(pose_id: int):
+            response = self.get_saved_pose(pose_id)
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
+
+        @app.patch('/api/manual/poses/<int:pose_id>')
+        def api_update_saved_pose(pose_id: int):
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                payload = {}
+            response = self.update_saved_pose(pose_id, payload)
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
+
+        @app.delete('/api/manual/poses/<int:pose_id>')
+        def api_delete_saved_pose(pose_id: int):
+            response = self.delete_saved_pose(pose_id)
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
+
+        @app.get('/api/manual/sequence')
+        def api_manual_sequence():
+            return jsonify({
+                'ok': True,
+                'sequence': self.manual_sequence_snapshot(),
+            })
+
+        @app.post('/api/manual/sequence/start')
+        def api_manual_sequence_start():
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                payload = {}
+            response = self.start_manual_sequence(payload)
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 400)
+            )
+            return jsonify(response), status_code
+
+        @app.post('/api/manual/sequence/stop')
+        def api_manual_sequence_stop():
+            response = self.stop_manual_sequence()
+            status_code = 200 if response.get('ok') else int(
+                response.get('status_code', 409)
+            )
+            return jsonify(response), status_code
 
         @app.post('/api/manual/<controller>')
         def api_manual_command(controller: str):
@@ -898,6 +1031,35 @@ class VicPinkyGuiNode(Node):
             path_text = '~/.ros/vicpinky_gui/event_log.sqlite3'
         return Path(os.path.expandvars(path_text)).expanduser()
 
+    @staticmethod
+    def _resolve_saved_pose_file(raw_path: str) -> Path:
+        path_text = str(raw_path or '').strip()
+        if not path_text:
+            path_text = '~/.ros/vicpinky_gui/saved_poses.json'
+        return Path(os.path.expandvars(path_text)).expanduser()
+
+    @staticmethod
+    def _idle_sequence_state() -> dict[str, Any]:
+        return {
+            'run_id': None,
+            'state': 'IDLE',
+            'active': False,
+            'pose_ids': [],
+            'total': 0,
+            'total_steps': 0,
+            'current_index': None,
+            'current_step': None,
+            'current_pose_id': None,
+            'name': None,
+            'current_pose_name': None,
+            'completed': 0,
+            'completed_count': 0,
+            'error': None,
+            'cancel_results': {},
+            'started_at': None,
+            'finished_at': None,
+        }
+
     def _open_event_log_db(self, path: Path) -> sqlite3.Connection | None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1014,16 +1176,16 @@ class VicPinkyGuiNode(Node):
             'mission_steps': mission_steps,
             'default_goal': {
                 'mission_id': self._default_mission_id(),
-                'pickup_location': 'home',
+                'pickup_location': '402',
                 'delivery_location': 'object_place',
                 'target_floor': 5,
-                'object_label': 'box',
-                'arm_task_name': 'pick_object_2',
+                'object_label': 'object_1',
+                'arm_task_name': 'deliver_object_1_from_tray',
             },
             'arm_tasks': deepcopy(ARM_TASK_OPTIONS),
             'default_nav': {
-                'location_name': 'home',
-                'location_id': '4:home',
+                'location_name': '402',
+                'location_id': '4:402',
                 'target_floor': 4,
             },
             'arm_commands': list(ARM_COMMANDS.keys()),
@@ -2005,12 +2167,14 @@ class VicPinkyGuiNode(Node):
             joint_state = deepcopy(self._joint_state)
             event_log = list(self._event_log)
             mission_events = list(self._mission_event_log)
-            mission_active = self._mission_goal_handle is not None
-            nav_active = self._nav_goal_handle is not None
+            mission_active = self._mission_motion_active_locked()
+            nav_active = self._nav_motion_active_locked()
             manual_last_commands = deepcopy(self._manual_last_commands)
             manual_feedback = deepcopy(self._manual_feedback)
+            manual_sequence = deepcopy(self._sequence_state)
+            manual_motion_active = self._manual_motion_active_locked()
             manual_active = {
-                name: self._manual_goal_handles.get(name) is not None
+                name: manual_motion_active
                 for name in self._manual_controllers
             }
             mission_status_age = self._age_ms(
@@ -2104,6 +2268,7 @@ class VicPinkyGuiNode(Node):
                 'last_commands': manual_last_commands,
                 'feedback': manual_feedback,
                 'mission_active': mission_active,
+                'sequence': manual_sequence,
             },
             'joints': {
                 'state': joint_state,
@@ -2662,6 +2827,1500 @@ class VicPinkyGuiNode(Node):
             return None
         return max(0.0, (now - seen_at) * 1000.0)
 
+    def _pose_store(self) -> SavedPoseStore:
+        if self._saved_pose_store is None:
+            detail = self._saved_pose_store_error or 'store is unavailable'
+            raise SavedPoseStoreError(detail)
+        return self._saved_pose_store
+
+    def saved_poses_snapshot(self) -> dict[str, Any]:
+        """Return saved poses without depending on ROS board readiness."""
+        try:
+            snapshot = self._pose_store().snapshot()
+        except SavedPoseStoreError as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Failed to read saved poses: {exc}',
+            }
+        return {
+            'ok': True,
+            **snapshot,
+            'saved_pose_file': str(self._saved_pose_file),
+        }
+
+    def get_saved_pose(self, pose_id: int) -> dict[str, Any]:
+        """Return one saved manual pose."""
+        try:
+            pose = self._pose_store().get(pose_id)
+        except SavedPoseNotFoundError as exc:
+            return {
+                'ok': False,
+                'status_code': 404,
+                'message': str(exc),
+            }
+        except SavedPoseStoreError as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Failed to read saved pose: {exc}',
+            }
+        return {'ok': True, 'pose': pose}
+
+    def create_saved_pose(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate and persist a pose using canonical ROS joint names."""
+        try:
+            fields = self._normalize_saved_pose_fields(payload)
+            requested_id = (
+                self._saved_pose_id(payload['id'])
+                if 'id' in payload
+                else None
+            )
+            store = self._pose_store()
+            pose = store.create(fields, requested_id)
+            next_id = store.snapshot()['next_id']
+        except (TypeError, ValueError) as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': str(exc),
+            }
+        except SavedPoseStoreError as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Failed to save pose: {exc}',
+            }
+
+        with self._lock:
+            self._append_event_locked(
+                kind='manual_pose',
+                level='info',
+                event_type='MANUAL_POSE_SAVED',
+                message=f'Saved manual pose {pose["id"]}: {pose["name"]}',
+                payload={
+                    'pose_id': pose['id'],
+                    'name': pose['name'],
+                },
+            )
+        return {
+            'ok': True,
+            'pose': pose,
+            'next_id': next_id,
+        }
+
+    def update_saved_pose(
+        self,
+        pose_id: int,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update ID, human-readable name, and dwell duration."""
+        allowed = {'id', 'name', 'dwell_sec'}
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': (
+                    'Only id, name and dwell_sec may be updated; unexpected: '
+                    + ', '.join(unknown)
+                ),
+            }
+        if not payload:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': 'At least one of id, name or dwell_sec is required',
+            }
+
+        try:
+            changes: dict[str, Any] = {}
+            new_pose_id = None
+            if 'id' in payload:
+                new_pose_id = self._saved_pose_id(payload['id'])
+            if 'name' in payload:
+                changes['name'] = self._saved_pose_name(payload['name'])
+            if 'dwell_sec' in payload:
+                changes['dwell_sec'] = self._saved_pose_dwell(
+                    payload['dwell_sec']
+                )
+            store = self._pose_store()
+            pose = store.update(pose_id, changes, new_pose_id)
+            next_id = store.snapshot()['next_id']
+        except (TypeError, ValueError) as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': str(exc),
+            }
+        except SavedPoseNotFoundError as exc:
+            return {
+                'ok': False,
+                'status_code': 404,
+                'message': str(exc),
+            }
+        except SavedPoseStoreError as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Failed to update saved pose: {exc}',
+            }
+
+        with self._lock:
+            self._append_event_locked(
+                kind='manual_pose',
+                level='info',
+                event_type='MANUAL_POSE_UPDATED',
+                message=f'Updated manual pose {pose["id"]}: {pose["name"]}',
+                payload={
+                    'pose_id': pose['id'],
+                    'name': pose['name'],
+                },
+            )
+        return {'ok': True, 'pose': pose, 'next_id': next_id}
+
+    def delete_saved_pose(self, pose_id: int) -> dict[str, Any]:
+        """Delete one pose and expose the newly available automatic ID."""
+        try:
+            store = self._pose_store()
+            pose = store.delete(pose_id)
+            next_id = store.snapshot()['next_id']
+        except SavedPoseNotFoundError as exc:
+            return {
+                'ok': False,
+                'status_code': 404,
+                'message': str(exc),
+            }
+        except SavedPoseStoreError as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Failed to delete saved pose: {exc}',
+            }
+
+        with self._lock:
+            self._append_event_locked(
+                kind='manual_pose',
+                level='info',
+                event_type='MANUAL_POSE_DELETED',
+                message=f'Deleted manual pose {pose["id"]}: {pose["name"]}',
+                payload={
+                    'pose_id': pose['id'],
+                    'name': pose['name'],
+                },
+            )
+        return {'ok': True, 'pose': pose, 'next_id': next_id}
+
+    def _normalize_saved_pose_fields(
+        self,
+        payload: dict[str, Any],
+        *,
+        require_canonical_positions: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError('Pose payload must be an object')
+
+        name = self._saved_pose_name(payload.get('name'))
+        dwell_sec = self._saved_pose_dwell(payload.get('dwell_sec', 0.0))
+        raw_controllers = payload.get('controllers')
+        if not isinstance(raw_controllers, dict):
+            raise ValueError('controllers must be an object')
+        if not all(isinstance(name, str) for name in raw_controllers):
+            raise ValueError('controller names must be strings')
+
+        configured = set(self._manual_controllers)
+        supplied = set(raw_controllers)
+        if supplied != configured:
+            missing = sorted(configured - supplied)
+            unexpected = sorted(supplied - configured)
+            detail = []
+            if missing:
+                detail.append('missing ' + ', '.join(missing))
+            if unexpected:
+                detail.append('unexpected ' + ', '.join(unexpected))
+            raise ValueError(
+                'controllers must exactly match the current configuration'
+                + (': ' + '; '.join(detail) if detail else '')
+            )
+        if not configured:
+            raise ValueError('No manual controllers are configured')
+
+        controllers: dict[str, Any] = {}
+        for controller in sorted(configured):
+            raw_controller = raw_controllers.get(controller)
+            if not isinstance(raw_controller, dict):
+                raise ValueError(f'{controller} controller must be an object')
+            config = self._manual_controllers[controller]
+            joints = list(config['joints'])
+            raw_positions = raw_controller.get('positions_deg')
+            if require_canonical_positions:
+                expected_names = {
+                    str(joint['joint_name']) for joint in joints
+                }
+                if not isinstance(raw_positions, dict):
+                    raise ValueError(
+                        f'{controller}.positions_deg must be an object'
+                    )
+                supplied_names = set(raw_positions)
+                if supplied_names != expected_names:
+                    raise ValueError(
+                        f'{controller} saved joint configuration does not '
+                        'match the current controller'
+                    )
+
+            positions = self._manual_positions_from_payload(
+                raw_positions,
+                joints,
+            )
+            duration_sec = self._manual_duration_from_payload(
+                raw_controller.get('duration_sec'),
+                float(config['default_duration_sec']),
+            )
+            normalized: dict[str, Any] = {
+                'positions_deg': {
+                    str(joint['joint_name']): positions[index]
+                    for index, joint in enumerate(joints)
+                },
+                'duration_sec': duration_sec,
+            }
+            if controller == 'gripper':
+                normalized['target_load_raw'] = (
+                    self._manual_target_load_from_payload(
+                        raw_controller.get(
+                            'target_load_raw',
+                            config.get('default_target_load_raw'),
+                        )
+                    )
+                )
+            controllers[controller] = normalized
+
+        return {
+            'name': name,
+            'dwell_sec': dwell_sec,
+            'controllers': controllers,
+        }
+
+    @staticmethod
+    def _saved_pose_name(raw_name: Any) -> str:
+        if not isinstance(raw_name, str):
+            raise ValueError('name must be a string')
+        name = raw_name.strip()
+        if not name:
+            raise ValueError('name is required')
+        if len(name) > 100:
+            raise ValueError('name must be at most 100 characters')
+        return name
+
+    @staticmethod
+    def _saved_pose_id(raw_id: Any) -> int:
+        if (
+            isinstance(raw_id, bool)
+            or not isinstance(raw_id, int)
+            or raw_id <= 0
+        ):
+            raise ValueError('id must be a positive integer')
+        return raw_id
+
+    @staticmethod
+    def _saved_pose_dwell(raw_dwell: Any) -> float:
+        if isinstance(raw_dwell, bool):
+            raise ValueError('dwell_sec must be a finite number')
+        try:
+            dwell_sec = float(raw_dwell)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('dwell_sec must be a finite number') from exc
+        if not math.isfinite(dwell_sec):
+            raise ValueError('dwell_sec must be a finite number')
+        if dwell_sec < 0.0:
+            raise ValueError('dwell_sec must be greater than or equal to 0')
+        return dwell_sec
+
+    def manual_sequence_snapshot(self) -> dict[str, Any]:
+        """Return a detached snapshot of the in-memory sequence state."""
+        with self._lock:
+            return deepcopy(self._sequence_state)
+
+    def _sequence_active_locked(self) -> bool:
+        return self._sequence_state.get('state') in SEQUENCE_ACTIVE_STATES
+
+    def _manual_motion_active_locked(self) -> bool:
+        for controller, handle in self._manual_goal_handles.items():
+            if handle is not None:
+                return True
+            state = (
+                self._manual_last_commands.get(controller) or {}
+            ).get('state')
+            if state in ACTION_BLOCKING_STATES:
+                return True
+        return False
+
+    def _mission_motion_active_locked(self) -> bool:
+        return (
+            self._mission_goal_handle is not None
+            or (self._mission_goal or {}).get('state')
+            in ACTION_BLOCKING_STATES
+        )
+
+    def _nav_motion_active_locked(self) -> bool:
+        return (
+            self._nav_goal_handle is not None
+            or (self._nav_goal or {}).get('state')
+            in ACTION_BLOCKING_STATES
+        )
+
+    def start_manual_sequence(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Preflight and start a saved-pose sequence in requested order."""
+        with self._lock:
+            conflict = self._manual_sequence_conflict_locked()
+        if conflict is not None:
+            return {
+                'ok': False,
+                'status_code': 409,
+                'message': conflict,
+            }
+
+        try:
+            store_snapshot = self._pose_store().snapshot()
+        except SavedPoseStoreError as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Failed to read saved poses: {exc}',
+            }
+
+        poses_by_id = {
+            int(pose['id']): pose
+            for pose in store_snapshot.get('poses', [])
+            if isinstance(pose, dict) and 'id' in pose
+        }
+        if 'pose_ids' not in payload:
+            pose_ids = sorted(poses_by_id)
+        else:
+            raw_pose_ids = payload.get('pose_ids')
+            if not isinstance(raw_pose_ids, list):
+                return {
+                    'ok': False,
+                    'status_code': 400,
+                    'message': 'pose_ids must be an array of positive integers',
+                }
+            pose_ids = []
+            seen_ids: set[int] = set()
+            for raw_pose_id in raw_pose_ids:
+                if (
+                    isinstance(raw_pose_id, bool)
+                    or not isinstance(raw_pose_id, int)
+                    or raw_pose_id <= 0
+                ):
+                    return {
+                        'ok': False,
+                        'status_code': 400,
+                        'message': (
+                            'pose_ids must contain only positive integers'
+                        ),
+                    }
+                if raw_pose_id in seen_ids:
+                    return {
+                        'ok': False,
+                        'status_code': 400,
+                        'message': f'Duplicate pose ID: {raw_pose_id}',
+                    }
+                seen_ids.add(raw_pose_id)
+                pose_ids.append(raw_pose_id)
+
+        if not pose_ids:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': 'At least one saved pose is required',
+            }
+
+        missing_ids = [pose_id for pose_id in pose_ids if pose_id not in poses_by_id]
+        if missing_ids:
+            return {
+                'ok': False,
+                'status_code': 404,
+                'message': (
+                    'Saved pose IDs were not found: '
+                    + ', '.join(str(value) for value in missing_ids)
+                ),
+            }
+
+        sequence_poses: list[dict[str, Any]] = []
+        try:
+            for pose_id in pose_ids:
+                stored_pose = poses_by_id[pose_id]
+                normalized = self._normalize_saved_pose_fields(
+                    stored_pose,
+                    require_canonical_positions=True,
+                )
+                sequence_poses.append({
+                    **normalized,
+                    'id': pose_id,
+                    'created_at': stored_pose.get('created_at'),
+                    'updated_at': stored_pose.get('updated_at'),
+                })
+        except (TypeError, ValueError) as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': f'Saved pose preflight failed: {exc}',
+            }
+
+        offline = []
+        for controller, config in self._manual_controllers.items():
+            client = self._manual_clients.get(controller)
+            if client is not None and not self._manual_action_ready(controller):
+                try:
+                    client.wait_for_server(timeout_sec=0.25)
+                except Exception:
+                    pass
+            if not self._manual_action_ready(controller):
+                offline.append({
+                    'controller': controller,
+                    'action_name': config['action_name'],
+                })
+        if offline:
+            return {
+                'ok': False,
+                'status_code': 503,
+                'message': 'Required manual action servers are not ready',
+                'offline_controllers': offline,
+            }
+
+        run_id = f'manual-sequence-{time.time_ns()}'
+        stop_event = threading.Event()
+        with self._lock:
+            conflict = self._manual_sequence_conflict_locked()
+            if conflict is not None:
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': conflict,
+                }
+            self._sequence_stop_event = stop_event
+            self._sequence_cancel_requested = set()
+            self._sequence_state = {
+                'run_id': run_id,
+                'state': 'STARTING',
+                'active': True,
+                'pose_ids': list(pose_ids),
+                'total': len(sequence_poses),
+                'total_steps': len(sequence_poses),
+                'current_index': None,
+                'current_step': None,
+                'current_pose_id': None,
+                'name': None,
+                'current_pose_name': None,
+                'completed': 0,
+                'completed_count': 0,
+                'error': None,
+                'cancel_results': {},
+                'started_at': self._now_iso(),
+                'finished_at': None,
+            }
+            worker = threading.Thread(
+                target=self._run_manual_sequence_safe,
+                args=(run_id, deepcopy(sequence_poses), stop_event),
+                name=f'vicpinky_{run_id}',
+                daemon=True,
+            )
+            self._sequence_thread = worker
+            self._append_event_locked(
+                kind='manual_sequence',
+                level='info',
+                event_type='MANUAL_SEQUENCE_START',
+                message=(
+                    f'Starting manual sequence {run_id} with '
+                    f'{len(sequence_poses)} poses'
+                ),
+                payload={
+                    'run_id': run_id,
+                    'pose_ids': list(pose_ids),
+                    'total': len(sequence_poses),
+                },
+            )
+
+        try:
+            worker.start()
+        except Exception as exc:
+            with self._lock:
+                self._sequence_state['state'] = 'FAILED'
+                self._sequence_state['active'] = False
+                self._sequence_state['error'] = str(exc)
+                self._sequence_state['finished_at'] = self._now_iso()
+                self._sequence_thread = None
+                self._append_event_locked(
+                    kind='manual_sequence',
+                    level='error',
+                    event_type='MANUAL_SEQUENCE_FAILED',
+                    message=f'Failed to start manual sequence: {exc}',
+                    payload={'run_id': run_id, 'error': str(exc)},
+                )
+            return {
+                'ok': False,
+                'status_code': 500,
+                'message': f'Failed to start sequence worker: {exc}',
+            }
+
+        return {
+            'ok': True,
+            'message': 'Manual sequence started',
+            'sequence': self.manual_sequence_snapshot(),
+        }
+
+    def _run_manual_sequence_safe(
+        self,
+        run_id: str,
+        poses: list[dict[str, Any]],
+        stop_event: threading.Event,
+    ) -> None:
+        try:
+            self._run_manual_sequence(run_id, poses, stop_event)
+        except Exception as exc:
+            stop_event.set()
+            try:
+                self._cancel_active_sequence_goals(run_id)
+            except Exception as cancel_exc:
+                self.get_logger().error(
+                    f'Sequence {run_id} emergency cancel failed: '
+                    f'{cancel_exc}'
+                )
+            with self._lock:
+                if self._sequence_state.get('run_id') != run_id:
+                    return
+                self._sequence_state['state'] = 'FAILED'
+                self._sequence_state['active'] = False
+                self._sequence_state['error'] = (
+                    f'Unhandled sequence worker error: {exc}'
+                )
+                self._sequence_state['finished_at'] = self._now_iso()
+                self._sequence_thread = None
+                self._append_event_locked(
+                    kind='manual_sequence',
+                    level='error',
+                    event_type='MANUAL_SEQUENCE_FAILED',
+                    message=(
+                        f'Manual sequence {run_id} worker failed: {exc}'
+                    ),
+                    payload={
+                        'run_id': run_id,
+                        'error': str(exc),
+                    },
+                )
+
+    def _manual_sequence_conflict_locked(self) -> str | None:
+        if self._sequence_active_locked():
+            return 'A manual sequence is already active'
+        if self._mission_motion_active_locked():
+            return 'Manual sequence is blocked while a mission is active'
+        if self._nav_motion_active_locked():
+            return 'Manual sequence is blocked while direct navigation is active'
+        active_manual = [
+            controller
+            for controller, handle in self._manual_goal_handles.items()
+            if (
+                handle is not None
+                or (
+                    self._manual_last_commands.get(controller) or {}
+                ).get('state') in ACTION_BLOCKING_STATES
+            )
+        ]
+        if active_manual:
+            return (
+                'Manual sequence is blocked while manual goals are active: '
+                + ', '.join(sorted(active_manual))
+            )
+        return None
+
+    def stop_manual_sequence(self) -> dict[str, Any]:
+        """Request immediate cancellation of the active sequence."""
+        with self._lock:
+            if not self._sequence_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'No active manual sequence to stop',
+                    'sequence': deepcopy(self._sequence_state),
+                }
+            run_id = str(self._sequence_state['run_id'])
+            self._sequence_state['state'] = 'STOPPING'
+            self._sequence_stop_event.set()
+            self._append_event_locked(
+                kind='manual_sequence',
+                level='info',
+                event_type='MANUAL_SEQUENCE_STOP_REQUESTED',
+                message=f'Stop requested for manual sequence {run_id}',
+                payload={'run_id': run_id},
+            )
+
+        cancel_results = self._cancel_active_sequence_goals(run_id)
+        return {
+            'ok': True,
+            'message': 'Manual sequence stop requested',
+            'cancel_results': cancel_results,
+            'sequence': self.manual_sequence_snapshot(),
+        }
+
+    def _run_manual_sequence(
+        self,
+        run_id: str,
+        poses: list[dict[str, Any]],
+        stop_event: threading.Event,
+    ) -> None:
+        terminal_state = 'COMPLETED'
+        terminal_error: str | None = None
+
+        with self._lock:
+            if self._sequence_state.get('run_id') != run_id:
+                return
+            self._sequence_state['state'] = 'RUNNING'
+
+        for index, pose in enumerate(poses, start=1):
+            if stop_event.is_set():
+                terminal_state = 'CANCELED'
+                break
+
+            with self._lock:
+                if self._sequence_state.get('run_id') != run_id:
+                    return
+                self._sequence_state['current_index'] = index
+                self._sequence_state['current_step'] = index
+                self._sequence_state['current_pose_id'] = pose['id']
+                self._sequence_state['name'] = pose['name']
+                self._sequence_state['current_pose_name'] = pose['name']
+                self._append_event_locked(
+                    kind='manual_sequence',
+                    level='info',
+                    event_type='MANUAL_SEQUENCE_STEP_START',
+                    message=(
+                        f'Sequence {run_id} step {index}/{len(poses)}: '
+                        f'pose {pose["id"]} ({pose["name"]})'
+                    ),
+                    payload={
+                        'run_id': run_id,
+                        'step_index': index,
+                        'total': len(poses),
+                        'pose_id': pose['id'],
+                        'name': pose['name'],
+                    },
+                )
+
+            step_state, step_error = self._execute_sequence_step(
+                run_id,
+                pose,
+                stop_event,
+            )
+            if step_state != 'SUCCEEDED':
+                terminal_state = step_state
+                terminal_error = step_error
+                break
+
+            dwell_sec = float(pose['dwell_sec'])
+            with self._lock:
+                self._append_event_locked(
+                    kind='manual_sequence',
+                    level='info',
+                    event_type='MANUAL_SEQUENCE_DWELL_START',
+                    message=(
+                        f'Sequence {run_id} pose {pose["id"]} dwell '
+                        f'{dwell_sec:.3f}s'
+                    ),
+                    payload={
+                        'run_id': run_id,
+                        'pose_id': pose['id'],
+                        'dwell_sec': dwell_sec,
+                    },
+                )
+
+            if self._wait_sequence_dwell(stop_event, dwell_sec):
+                terminal_state = 'CANCELED'
+                break
+
+            with self._lock:
+                self._sequence_state['completed'] = index
+                self._sequence_state['completed_count'] = index
+                self._append_event_locked(
+                    kind='manual_sequence',
+                    level='info',
+                    event_type='MANUAL_SEQUENCE_DWELL_COMPLETE',
+                    message=(
+                        f'Sequence {run_id} pose {pose["id"]} dwell complete'
+                    ),
+                    payload={
+                        'run_id': run_id,
+                        'pose_id': pose['id'],
+                        'completed': index,
+                    },
+                )
+
+        if stop_event.is_set() and terminal_state == 'COMPLETED':
+            terminal_state = 'CANCELED'
+
+        if terminal_state == 'CANCELED':
+            cancel_results = self._cancel_active_sequence_goals(run_id)
+            if not self._sequence_cancellation_clean(cancel_results):
+                terminal_state = 'FAILED'
+                terminal_error = 'One or more active goals could not be canceled'
+
+        with self._lock:
+            if self._sequence_state.get('run_id') != run_id:
+                return
+            self._sequence_state['state'] = terminal_state
+            self._sequence_state['active'] = False
+            self._sequence_state['error'] = terminal_error
+            self._sequence_state['finished_at'] = self._now_iso()
+            self._sequence_thread = None
+            event_type = f'MANUAL_SEQUENCE_{terminal_state}'
+            level = 'info' if terminal_state in {'COMPLETED', 'CANCELED'} else 'error'
+            message = f'Manual sequence {run_id} {terminal_state.lower()}'
+            if terminal_error:
+                message += f': {terminal_error}'
+            self._append_event_locked(
+                kind='manual_sequence',
+                level=level,
+                event_type=event_type,
+                message=message,
+                payload={
+                    'run_id': run_id,
+                    'state': terminal_state,
+                    'completed': self._sequence_state['completed'],
+                    'total': self._sequence_state['total'],
+                    'error': terminal_error,
+                    'cancel_results': deepcopy(
+                        self._sequence_state['cancel_results']
+                    ),
+                },
+            )
+
+    @staticmethod
+    def _wait_sequence_dwell(
+        stop_event: threading.Event,
+        dwell_sec: float,
+    ) -> bool:
+        deadline = time.monotonic() + dwell_sec
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return False
+            if stop_event.wait(timeout=min(remaining, 1.0)):
+                return True
+
+    def _execute_sequence_step(
+        self,
+        run_id: str,
+        pose: dict[str, Any],
+        stop_event: threading.Event,
+    ) -> tuple[str, str | None]:
+        send_futures: dict[str, Any] = {}
+        summaries: dict[str, dict[str, Any]] = {}
+        for controller, controller_payload in pose['controllers'].items():
+            try:
+                goal_msg, summary = self._manual_goal_from_payload(
+                    controller,
+                    controller_payload,
+                )
+                send_futures[controller] = self._manual_clients[
+                    controller
+                ].send_goal_async(
+                    goal_msg,
+                    feedback_callback=lambda msg, name=controller: (
+                        self._manual_feedback_callback(name, msg)
+                    ),
+                )
+                summaries[controller] = summary
+            except Exception as exc:
+                for pending_controller, future in send_futures.items():
+                    self._attach_late_sequence_cancel(
+                        run_id,
+                        pending_controller,
+                        future,
+                    )
+                return 'FAILED', f'Failed to send {controller} goal: {exc}'
+
+            with self._lock:
+                self._manual_last_commands[controller] = {
+                    **summary,
+                    'state': 'SENDING',
+                    'sent_at': self._now_iso(),
+                    'run_id': run_id,
+                    'pose_id': pose['id'],
+                }
+                self._manual_feedback[controller] = None
+                self._append_event_locked(
+                    kind='manual_sequence',
+                    level='info',
+                    event_type='MANUAL_SEQUENCE_CONTROLLER_SENT',
+                    message=(
+                        f'Sequence {run_id} sent {controller} for '
+                        f'pose {pose["id"]}'
+                    ),
+                    payload={
+                        'run_id': run_id,
+                        'pose_id': pose['id'],
+                        'controller': controller,
+                        'duration_sec': summary['duration_sec'],
+                    },
+                )
+
+        accepted: dict[str, Any] = {}
+        pending = set(send_futures)
+        wake = threading.Event()
+        for future in send_futures.values():
+            future.add_done_callback(lambda _future: wake.set())
+        deadline = time.monotonic() + self._request_timeout_s
+
+        while pending:
+            for controller in list(pending):
+                future = send_futures[controller]
+                if not future.done():
+                    continue
+                pending.remove(controller)
+                try:
+                    goal_handle = future.result()
+                except Exception as exc:
+                    self._attach_pending_sequence_cancels(
+                        run_id,
+                        pending,
+                        send_futures,
+                    )
+                    unresolved = self._cancel_and_drain_sequence_handles(
+                        run_id,
+                        int(pose['id']),
+                        accepted,
+                    )
+                    message = f'{controller} goal send failed: {exc}'
+                    if unresolved:
+                        message += (
+                            '; canceled peers have no terminal result: '
+                            + ', '.join(sorted(unresolved))
+                        )
+                    return 'FAILED', message
+                if goal_handle is None or not goal_handle.accepted:
+                    with self._lock:
+                        self._manual_last_commands[controller]['state'] = (
+                            'REJECTED'
+                        )
+                        self._append_event_locked(
+                            kind='manual_sequence',
+                            level='error',
+                            event_type='MANUAL_SEQUENCE_CONTROLLER_REJECTED',
+                            message=(
+                                f'Sequence {run_id} {controller} goal rejected'
+                            ),
+                            payload={
+                                'run_id': run_id,
+                                'pose_id': pose['id'],
+                                'controller': controller,
+                            },
+                        )
+                    self._attach_pending_sequence_cancels(
+                        run_id,
+                        pending,
+                        send_futures,
+                    )
+                    unresolved = self._cancel_and_drain_sequence_handles(
+                        run_id,
+                        int(pose['id']),
+                        accepted,
+                    )
+                    message = f'{controller} goal was rejected'
+                    if unresolved:
+                        message += (
+                            '; canceled peers have no terminal result: '
+                            + ', '.join(sorted(unresolved))
+                        )
+                    return 'FAILED', message
+
+                accepted[controller] = goal_handle
+                with self._lock:
+                    self._manual_goal_handles[controller] = goal_handle
+                    self._manual_last_commands[controller]['state'] = 'ACCEPTED'
+                    self._manual_last_commands[controller]['accepted_at'] = (
+                        self._now_iso()
+                    )
+                    self._append_event_locked(
+                        kind='manual_sequence',
+                        level='info',
+                        event_type='MANUAL_SEQUENCE_CONTROLLER_ACCEPTED',
+                        message=(
+                            f'Sequence {run_id} {controller} goal accepted'
+                        ),
+                        payload={
+                            'run_id': run_id,
+                            'pose_id': pose['id'],
+                            'controller': controller,
+                        },
+                    )
+
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                self._attach_pending_sequence_cancels(
+                    run_id,
+                    pending,
+                    send_futures,
+                )
+                unresolved = self._cancel_and_drain_sequence_handles(
+                    run_id,
+                    int(pose['id']),
+                    accepted,
+                )
+                suffix = (
+                    '; canceled peers have no terminal result: '
+                    + ', '.join(sorted(unresolved))
+                    if unresolved
+                    else ''
+                )
+                if stop_event.is_set():
+                    return 'FAILED', (
+                        'Timed out while canceling pending goal sends' + suffix
+                    )
+                return 'FAILED', 'Timed out while sending sequence goals' + suffix
+            if stop_event.is_set():
+                self._cancel_active_sequence_goals(run_id)
+            wake.wait(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
+            wake.clear()
+
+        result_futures: dict[str, Any] = {}
+        result_setup_errors: list[tuple[str, Exception]] = []
+        for controller, handle in accepted.items():
+            try:
+                result_futures[controller] = handle.get_result_async()
+            except Exception as exc:
+                result_setup_errors.append((controller, exc))
+
+        if result_setup_errors:
+            unresolved = self._cancel_and_drain_sequence_handles(
+                run_id,
+                int(pose['id']),
+                accepted,
+                result_futures=result_futures,
+            )
+            error_detail = '; '.join(
+                f'{controller}: {exc}'
+                for controller, exc in result_setup_errors
+            )
+            message = f'Failed to observe sequence results: {error_detail}'
+            if unresolved:
+                message += (
+                    '; handles without a terminal result: '
+                    + ', '.join(sorted(unresolved))
+                )
+            return 'FAILED', message
+
+        max_duration = max(
+            float(summary['duration_sec']) for summary in summaries.values()
+        )
+        return self._wait_for_sequence_results(
+            run_id,
+            pose,
+            accepted,
+            result_futures,
+            stop_event,
+            max_duration + self._sequence_step_timeout_margin_s,
+        )
+
+    def _wait_for_sequence_results(
+        self,
+        run_id: str,
+        pose: dict[str, Any],
+        handles: dict[str, Any],
+        result_futures: dict[str, Any],
+        stop_event: threading.Event,
+        timeout_sec: float,
+    ) -> tuple[str, str | None]:
+        pending = set(result_futures)
+        results: dict[str, dict[str, Any]] = {}
+        wake = threading.Event()
+        for future in result_futures.values():
+            future.add_done_callback(lambda _future: wake.set())
+        deadline = time.monotonic() + max(0.1, timeout_sec)
+        cancellation_deadline: float | None = None
+        failure_error: str | None = None
+
+        while pending:
+            for controller in list(pending):
+                future = result_futures[controller]
+                if not future.done():
+                    continue
+                pending.remove(controller)
+                result_payload = self._sequence_result_payload(future)
+                results[controller] = result_payload
+                self._record_sequence_controller_result(
+                    run_id,
+                    int(pose['id']),
+                    controller,
+                    handles[controller],
+                    result_payload,
+                )
+
+                if (
+                    not result_payload['ok']
+                    and not stop_event.is_set()
+                    and failure_error is None
+                ):
+                    failure_error = (
+                        f'{controller} {result_payload["status"]}: '
+                        f'{result_payload["error_string"]}'
+                    )
+                    self._cancel_active_sequence_goals(run_id)
+                    cancellation_deadline = (
+                        time.monotonic() + self._request_timeout_s
+                    )
+
+            if not pending:
+                break
+
+            if stop_event.is_set():
+                self._cancel_active_sequence_goals(run_id)
+                if cancellation_deadline is None:
+                    cancellation_deadline = (
+                        time.monotonic() + self._request_timeout_s
+                    )
+            elif failure_error is None and time.monotonic() >= deadline:
+                failure_error = 'Sequence step result timed out'
+                self._cancel_active_sequence_goals(run_id)
+                cancellation_deadline = (
+                    time.monotonic() + self._request_timeout_s
+                )
+
+            active_deadline = (
+                cancellation_deadline
+                if cancellation_deadline is not None
+                else deadline
+            )
+
+            if time.monotonic() >= active_deadline:
+                self._attach_sequence_result_cleanups(
+                    run_id,
+                    int(pose['id']),
+                    pending,
+                    handles,
+                    result_futures,
+                )
+                unresolved = ', '.join(sorted(pending))
+                if stop_event.is_set():
+                    return 'FAILED', (
+                        'Timed out waiting for canceled goals to reach a '
+                        f'terminal result: {unresolved}'
+                    )
+                if failure_error:
+                    return 'FAILED', (
+                        f'{failure_error}; canceled peers did not reach a '
+                        f'terminal result: {unresolved}'
+                    )
+                return 'FAILED', (
+                    'Sequence goals did not reach a terminal result: '
+                    + unresolved
+                )
+
+            wake.wait(
+                timeout=min(
+                    0.05,
+                    max(0.0, active_deadline - time.monotonic()),
+                )
+            )
+            wake.clear()
+
+        if stop_event.is_set():
+            cancel_results = self._cancel_active_sequence_goals(run_id)
+            failed_cancels = {
+                controller
+                for controller, result in cancel_results.items()
+                if not result.get('ok')
+                and not results.get(controller, {}).get('ok')
+                and results.get(controller, {}).get('status') != 'CANCELED'
+            }
+            if failed_cancels:
+                return 'FAILED', (
+                    'Cancellation failed for: '
+                    + ', '.join(sorted(failed_cancels))
+                )
+            return 'CANCELED', None
+
+        if failure_error is not None:
+            return 'FAILED', failure_error
+        return 'SUCCEEDED', None
+
+    def _record_sequence_controller_result(
+        self,
+        run_id: str,
+        pose_id: int,
+        controller: str,
+        goal_handle: Any,
+        result_payload: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            if self._manual_goal_handles.get(controller) is not goal_handle:
+                return
+            self._manual_goal_handles[controller] = None
+            command = self._manual_last_commands.get(controller)
+            if command is not None and command.get('run_id') == run_id:
+                command['state'] = result_payload['status']
+                command['result'] = result_payload
+                command['finished_at'] = result_payload['received_at']
+            self._append_event_locked(
+                kind='manual_sequence',
+                level='info' if result_payload['ok'] else 'error',
+                event_type='MANUAL_SEQUENCE_CONTROLLER_RESULT',
+                message=(
+                    f'Sequence {run_id} {controller} '
+                    f'{result_payload["status"]}: '
+                    f'{result_payload["error_string"]}'
+                ),
+                payload={
+                    'run_id': run_id,
+                    'pose_id': pose_id,
+                    'controller': controller,
+                    'status': result_payload['status'],
+                    'error_code': result_payload['error_code'],
+                    'error_string': result_payload['error_string'],
+                },
+            )
+
+    def _attach_sequence_result_cleanups(
+        self,
+        run_id: str,
+        pose_id: int,
+        pending: set[str],
+        handles: dict[str, Any],
+        result_futures: dict[str, Any],
+    ) -> None:
+        for controller in pending:
+            goal_handle = handles[controller]
+            result_futures[controller].add_done_callback(
+                lambda future, name=controller, handle=goal_handle: (
+                    self._late_sequence_result_callback(
+                        run_id,
+                        pose_id,
+                        name,
+                        handle,
+                        future,
+                    )
+                )
+            )
+
+    def _late_sequence_result_callback(
+        self,
+        run_id: str,
+        pose_id: int,
+        controller: str,
+        goal_handle: Any,
+        future: Any,
+    ) -> None:
+        self._record_sequence_controller_result(
+            run_id,
+            pose_id,
+            controller,
+            goal_handle,
+            self._sequence_result_payload(future),
+        )
+
+    def _cancel_and_drain_sequence_handles(
+        self,
+        run_id: str,
+        pose_id: int,
+        handles: dict[str, Any],
+        *,
+        result_futures: dict[str, Any] | None = None,
+    ) -> set[str]:
+        if not handles:
+            return set()
+        self._cancel_active_sequence_goals(run_id)
+
+        observable_futures = dict(result_futures or {})
+        unresolved = set(handles)
+        if result_futures is None:
+            for controller, goal_handle in handles.items():
+                try:
+                    observable_futures[
+                        controller
+                    ] = goal_handle.get_result_async()
+                except Exception as exc:
+                    self.get_logger().warning(
+                        f'Failed to observe canceled {controller} result: '
+                        f'{exc}'
+                    )
+
+        deadline = time.monotonic() + self._request_timeout_s
+        pending = set(observable_futures)
+        while pending and time.monotonic() < deadline:
+            for controller in list(pending):
+                future = observable_futures[controller]
+                if not future.done():
+                    continue
+                pending.remove(controller)
+                unresolved.discard(controller)
+                self._record_sequence_controller_result(
+                    run_id,
+                    pose_id,
+                    controller,
+                    handles[controller],
+                    self._sequence_result_payload(future),
+                )
+            if pending:
+                time.sleep(0.01)
+
+        self._attach_sequence_result_cleanups(
+            run_id,
+            pose_id,
+            pending,
+            handles,
+            observable_futures,
+        )
+        return unresolved
+
+    def _sequence_result_payload(self, future: Any) -> dict[str, Any]:
+        try:
+            result_response = future.result()
+            result = result_response.result
+            status_name = STATUS_NAME_BY_CODE.get(
+                result_response.status,
+                f'STATUS_{result_response.status}',
+            )
+            error_code = int(result.error_code)
+            error_string = str(result.error_string)
+            ok = (
+                result_response.status == GoalStatus.STATUS_SUCCEEDED
+                and error_code == FollowJointTrajectory.Result.SUCCESSFUL
+            )
+        except Exception as exc:
+            status_name = 'ERROR'
+            error_code = None
+            error_string = str(exc)
+            ok = False
+        return {
+            'ok': ok,
+            'status': status_name,
+            'error_code': error_code,
+            'error_string': error_string,
+            'received_at': self._now_iso(),
+        }
+
+    def _cancel_active_sequence_goals(
+        self,
+        run_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        with self._sequence_cancel_lock:
+            with self._lock:
+                if self._sequence_state.get('run_id') != run_id:
+                    return {}
+                handles = {
+                    controller: handle
+                    for controller, handle in self._manual_goal_handles.items()
+                    if handle is not None
+                    and controller not in self._sequence_cancel_requested
+                }
+                self._sequence_cancel_requested.update(handles)
+                existing = deepcopy(
+                    self._sequence_state.get('cancel_results') or {}
+                )
+
+            if not handles:
+                return existing
+
+            futures: dict[str, Any] = {}
+            for controller, handle in handles.items():
+                try:
+                    futures[controller] = handle.cancel_goal_async()
+                except Exception as exc:
+                    existing[controller] = {
+                        'ok': False,
+                        'status': 'ERROR',
+                        'message': str(exc),
+                    }
+                with self._lock:
+                    self._append_event_locked(
+                        kind='manual_sequence',
+                        level='info',
+                        event_type='MANUAL_SEQUENCE_CONTROLLER_CANCEL_REQUEST',
+                        message=(
+                            f'Sequence {run_id} cancel requested for '
+                            f'{controller}'
+                        ),
+                        payload={
+                            'run_id': run_id,
+                            'controller': controller,
+                        },
+                    )
+
+            deadline = time.monotonic() + self._request_timeout_s
+            pending = set(futures)
+            while pending and time.monotonic() < deadline:
+                for controller in list(pending):
+                    future = futures[controller]
+                    if not future.done():
+                        continue
+                    pending.remove(controller)
+                    try:
+                        response = future.result()
+                        canceling = bool(response.goals_canceling)
+                        existing[controller] = {
+                            'ok': canceling,
+                            'status': (
+                                'CANCELING' if canceling
+                                else 'CANCEL_REJECTED'
+                            ),
+                            'message': (
+                                'Cancel accepted' if canceling
+                                else 'Cancel rejected'
+                            ),
+                        }
+                    except Exception as exc:
+                        existing[controller] = {
+                            'ok': False,
+                            'status': 'ERROR',
+                            'message': str(exc),
+                        }
+                if pending:
+                    time.sleep(0.01)
+
+            for controller in pending:
+                existing[controller] = {
+                    'ok': False,
+                    'status': 'TIMEOUT',
+                    'message': 'Cancel request timed out',
+                }
+
+            with self._lock:
+                if self._sequence_state.get('run_id') == run_id:
+                    self._sequence_state['cancel_results'] = deepcopy(existing)
+                    for controller in handles:
+                        result = existing.get(controller, {})
+                        self._append_event_locked(
+                            kind='manual_sequence',
+                            level='info' if result.get('ok') else 'error',
+                            event_type='MANUAL_SEQUENCE_CONTROLLER_CANCEL_RESULT',
+                            message=(
+                                f'Sequence {run_id} {controller} cancel '
+                                f'{result.get("status", "UNKNOWN").lower()}'
+                            ),
+                            payload={
+                                'run_id': run_id,
+                                'controller': controller,
+                                **result,
+                            },
+                        )
+            return existing
+
+    @staticmethod
+    def _sequence_cancellation_clean(
+        cancel_results: dict[str, dict[str, Any]],
+    ) -> bool:
+        return all(result.get('ok') for result in cancel_results.values())
+
+    def _attach_pending_sequence_cancels(
+        self,
+        run_id: str,
+        pending: set[str],
+        futures: dict[str, Any],
+    ) -> None:
+        for controller in pending:
+            self._attach_late_sequence_cancel(
+                run_id,
+                controller,
+                futures[controller],
+            )
+
+    def _attach_late_sequence_cancel(
+        self,
+        run_id: str,
+        controller: str,
+        send_future: Any,
+    ) -> None:
+        send_future.add_done_callback(
+            lambda future: self._cancel_late_sequence_goal(
+                run_id,
+                controller,
+                future,
+            )
+        )
+
+    def _cancel_late_sequence_goal(
+        self,
+        run_id: str,
+        controller: str,
+        send_future: Any,
+    ) -> None:
+        try:
+            goal_handle = send_future.result()
+        except Exception as exc:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get('run_id') == run_id:
+                    command['state'] = 'SEND_ERROR'
+                    command['result'] = {'error_string': str(exc)}
+            self.get_logger().warning(
+                f'Late {controller} send failed for {run_id}: {exc}'
+            )
+            return
+
+        if goal_handle is None or not goal_handle.accepted:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get('run_id') == run_id:
+                    command['state'] = 'REJECTED'
+            return
+
+        with self._lock:
+            existing = self._manual_goal_handles.get(controller)
+            if existing is not None and existing is not goal_handle:
+                self.get_logger().error(
+                    f'Cannot track late {controller} goal for {run_id}: '
+                    'another handle is active'
+                )
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                return
+            self._manual_goal_handles[controller] = goal_handle
+            command = self._manual_last_commands.get(controller)
+            pose_id = 0
+            if command is not None and command.get('run_id') == run_id:
+                command['state'] = 'CANCELING'
+                pose_id = int(command.get('pose_id') or 0)
+            self._append_event_locked(
+                kind='manual_sequence',
+                level='info',
+                event_type='MANUAL_SEQUENCE_LATE_GOAL_CANCEL',
+                message=(
+                    f'Sequence {run_id} canceled late-accepted '
+                    f'{controller} goal'
+                ),
+                payload={
+                    'run_id': run_id,
+                    'controller': controller,
+                },
+            )
+
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as exc:
+            self.get_logger().error(
+                f'Cannot observe late {controller} result for {run_id}: {exc}'
+            )
+            result_future = None
+        try:
+            goal_handle.cancel_goal_async()
+        except Exception as exc:
+            self.get_logger().error(
+                f'Failed to cancel late {controller} goal for {run_id}: {exc}'
+            )
+        if result_future is not None:
+            result_future.add_done_callback(
+                lambda future: self._late_sequence_result_callback(
+                    run_id,
+                    pose_id,
+                    controller,
+                    goal_handle,
+                    future,
+                )
+            )
+
     def _mission_action_ready(self) -> bool:
         try:
             return bool(self._mission_client.server_is_ready())
@@ -2765,17 +4424,34 @@ class VicPinkyGuiNode(Node):
             }
 
         with self._lock:
-            if self._mission_goal_handle is not None:
+            if self._sequence_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Manual control is blocked while a sequence is active'
+                    ),
+                }
+            if self._manual_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'Another manual motion is still active',
+                }
+            if self._mission_motion_active_locked():
                 return {
                     'ok': False,
                     'status_code': 409,
                     'message': 'Manual control is blocked while a mission is active',
                 }
-            if self._manual_goal_handles.get(controller) is not None:
+            if self._nav_motion_active_locked():
                 return {
                     'ok': False,
                     'status_code': 409,
-                    'message': f'{config["label"]} manual goal is already active',
+                    'message': (
+                        'Manual control is blocked while direct navigation '
+                        'is active'
+                    ),
                 }
 
         if not self._manual_action_ready(controller):
@@ -2802,9 +4478,40 @@ class VicPinkyGuiNode(Node):
                 'message': str(exc),
             }
 
+        command_id = f'manual-{controller}-{time.time_ns()}'
         with self._lock:
+            if self._sequence_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Manual control is blocked while a sequence is active'
+                    ),
+                }
+            if self._manual_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'Another manual motion is still active',
+                }
+            if self._mission_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'Manual control is blocked while a mission is active',
+                }
+            if self._nav_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Manual control is blocked while direct navigation '
+                        'is active'
+                    ),
+                }
             self._manual_last_commands[controller] = {
                 **summary,
+                'command_id': command_id,
                 'state': 'SENDING',
                 'sent_at': self._now_iso(),
             }
@@ -2815,36 +4522,67 @@ class VicPinkyGuiNode(Node):
                 message=f'Sending {config["label"]} manual goal',
             )
 
-        send_future = client.send_goal_async(
-            goal_msg,
-            feedback_callback=lambda msg: self._manual_feedback_callback(
-                controller,
-                msg,
-            ),
-        )
+        try:
+            send_future = client.send_goal_async(
+                goal_msg,
+                feedback_callback=lambda msg: self._manual_feedback_callback(
+                    controller,
+                    msg,
+                ),
+            )
+        except Exception as exc:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['state'] = 'SEND_ERROR'
+                    command['result'] = {'error_string': str(exc)}
+            return {
+                'ok': False,
+                'status_code': 500,
+                'message': f'Failed to send {controller} goal: {exc}',
+            }
         goal_handle = self._wait_for_future(send_future)
 
         if goal_handle is None:
             with self._lock:
-                if self._manual_last_commands[controller] is not None:
-                    self._manual_last_commands[controller]['state'] = (
-                        'SEND_TIMEOUT'
-                    )
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['state'] = 'SEND_TIMEOUT_PENDING'
                 self._append_event_locked(
                     kind='manual',
                     level='error',
-                    message=f'{config["label"]} manual send timed out',
+                    message=(
+                        f'{config["label"]} manual send timed out; '
+                        'late resolution is still pending'
+                    ),
                 )
+            send_future.add_done_callback(
+                lambda future: self._manual_late_send_callback(
+                    controller,
+                    command_id,
+                    future,
+                )
+            )
             return {
                 'ok': False,
                 'status_code': 504,
-                'message': f'Timed out while sending {controller} goal',
+                'message': (
+                    f'Timed out while sending {controller} goal; '
+                    'motion remains blocked until late resolution'
+                ),
             }
 
         if not goal_handle.accepted:
             with self._lock:
-                if self._manual_last_commands[controller] is not None:
-                    self._manual_last_commands[controller]['state'] = 'REJECTED'
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['state'] = 'REJECTED'
                 self._append_event_locked(
                     kind='manual',
                     level='error',
@@ -2856,23 +4594,50 @@ class VicPinkyGuiNode(Node):
                 'message': f'{config["label"]} manual goal was rejected',
             }
 
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(
-            lambda future: self._manual_result_callback(controller, future)
-        )
-
         with self._lock:
             self._manual_goal_handles[controller] = goal_handle
-            if self._manual_last_commands[controller] is not None:
-                self._manual_last_commands[controller]['state'] = 'ACCEPTED'
-                self._manual_last_commands[controller]['accepted_at'] = (
-                    self._now_iso()
-                )
+            command = self._manual_last_commands.get(controller)
+            if command is not None and command.get(
+                'command_id'
+            ) == command_id:
+                command['state'] = 'ACCEPTED'
+                command['accepted_at'] = self._now_iso()
             self._append_event_locked(
                 kind='manual',
                 level='info',
                 message=f'{config["label"]} manual goal accepted',
             )
+
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as exc:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['state'] = 'CANCELING'
+                    command['result'] = {'error_string': str(exc)}
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            return {
+                'ok': False,
+                'status_code': 500,
+                'message': (
+                    f'Could not observe {controller} result: {exc}; '
+                    'goal cancellation requested'
+                ),
+            }
+        result_future.add_done_callback(
+            lambda future: self._manual_result_callback(
+                controller,
+                future,
+                expected_handle=goal_handle,
+                command_id=command_id,
+            )
+        )
 
         return {
             'ok': True,
@@ -2959,6 +4724,8 @@ class VicPinkyGuiNode(Node):
 
             if raw_value is None:
                 raise ValueError(f'positions_deg is missing {key}')
+            if isinstance(raw_value, bool):
+                raise ValueError(f'{key} target must be a finite number')
 
             value = float(raw_value)
             if not math.isfinite(value):
@@ -2980,6 +4747,8 @@ class VicPinkyGuiNode(Node):
         raw_duration: Any,
         default_duration_s: float,
     ) -> float:
+        if isinstance(raw_duration, bool):
+            raise ValueError('duration_sec must be a finite number')
         duration_s = (
             default_duration_s
             if raw_duration is None
@@ -2999,7 +4768,24 @@ class VicPinkyGuiNode(Node):
 
     @staticmethod
     def _manual_target_load_from_payload(raw_load: Any) -> int:
-        target_load = int(raw_load)
+        if isinstance(raw_load, bool):
+            raise ValueError(
+                f'target_load_raw must be an integer in '
+                f'0..{BOARD3_TARGET_LOAD_MAX}'
+            )
+        try:
+            numeric_load = float(raw_load)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f'target_load_raw must be an integer in '
+                f'0..{BOARD3_TARGET_LOAD_MAX}'
+            ) from exc
+        if not math.isfinite(numeric_load) or not numeric_load.is_integer():
+            raise ValueError(
+                f'target_load_raw must be an integer in '
+                f'0..{BOARD3_TARGET_LOAD_MAX}'
+            )
+        target_load = int(numeric_load)
         if not 0 <= target_load <= BOARD3_TARGET_LOAD_MAX:
             raise ValueError(
                 f'target_load_raw must be in 0..{BOARD3_TARGET_LOAD_MAX}'
@@ -3040,10 +4826,97 @@ class VicPinkyGuiNode(Node):
                 'received_at': self._now_iso(),
             }
 
+    def _manual_late_send_callback(
+        self,
+        controller: str,
+        command_id: str,
+        send_future: Any,
+    ) -> None:
+        config = self._manual_controllers[controller]
+        try:
+            goal_handle = send_future.result()
+        except Exception as exc:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['state'] = 'SEND_ERROR'
+                    command['result'] = {'error_string': str(exc)}
+            return
+
+        if goal_handle is None or not goal_handle.accepted:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['state'] = 'REJECTED'
+            return
+
+        with self._lock:
+            command = self._manual_last_commands.get(controller)
+            if command is None or command.get('command_id') != command_id:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                return
+            current_handle = self._manual_goal_handles.get(controller)
+            if current_handle is not None and current_handle is not goal_handle:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                return
+            self._manual_goal_handles[controller] = goal_handle
+            command['state'] = 'CANCELING'
+            command['accepted_at'] = self._now_iso()
+            self._append_event_locked(
+                kind='manual',
+                level='error',
+                message=(
+                    f'{config["label"]} late goal accepted; '
+                    'cancellation requested'
+                ),
+            )
+
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as exc:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['result'] = {'error_string': str(exc)}
+            result_future = None
+        try:
+            goal_handle.cancel_goal_async()
+        except Exception as exc:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['result'] = {'error_string': str(exc)}
+        if result_future is not None:
+            result_future.add_done_callback(
+                lambda future: self._manual_result_callback(
+                    controller,
+                    future,
+                    expected_handle=goal_handle,
+                    command_id=command_id,
+                )
+            )
+
     def _manual_result_callback(
         self,
         controller: str,
         future: Any,
+        *,
+        expected_handle: Any | None = None,
+        command_id: str | None = None,
     ) -> None:
         config = self._manual_controllers[controller]
         try:
@@ -3074,17 +4947,26 @@ class VicPinkyGuiNode(Node):
             }
 
         with self._lock:
+            if (
+                expected_handle is not None
+                and self._manual_goal_handles.get(controller)
+                is not expected_handle
+            ):
+                return
+            command = self._manual_last_commands.get(controller)
+            if (
+                command_id is not None
+                and (
+                    command is None
+                    or command.get('command_id') != command_id
+                )
+            ):
+                return
             self._manual_goal_handles[controller] = None
-            if self._manual_last_commands[controller] is not None:
-                self._manual_last_commands[controller]['state'] = (
-                    result_payload['status']
-                )
-                self._manual_last_commands[controller]['result'] = (
-                    result_payload
-                )
-                self._manual_last_commands[controller]['finished_at'] = (
-                    result_payload['received_at']
-                )
+            if command is not None:
+                command['state'] = result_payload['status']
+                command['result'] = result_payload
+                command['finished_at'] = result_payload['received_at']
             self._append_event_locked(
                 kind='manual',
                 level='info' if result_payload['ok'] else 'error',
@@ -3097,13 +4979,31 @@ class VicPinkyGuiNode(Node):
     def start_direct_nav(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send one same-floor /nav/go_to RunTask goal."""
         with self._lock:
-            if self._mission_goal_handle is not None:
+            if self._sequence_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Direct navigation is blocked while a manual '
+                        'sequence is active'
+                    ),
+                }
+            if self._manual_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Direct navigation is blocked while manual motion '
+                        'is active'
+                    ),
+                }
+            if self._mission_motion_active_locked():
                 return {
                     'ok': False,
                     'status_code': 409,
                     'message': 'Direct navigation is blocked while a mission is active',
                 }
-            if self._nav_goal_handle is not None:
+            if self._nav_motion_active_locked():
                 return {
                     'ok': False,
                     'status_code': 409,
@@ -3129,9 +5029,43 @@ class VicPinkyGuiNode(Node):
                 'message': str(exc),
             }
 
+        request_id = f'nav-{time.time_ns()}'
         with self._lock:
+            if self._sequence_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Direct navigation is blocked while a manual '
+                        'sequence is active'
+                    ),
+                }
+            if self._manual_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Direct navigation is blocked while manual motion '
+                        'is active'
+                    ),
+                }
+            if self._mission_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Direct navigation is blocked while a mission is active'
+                    ),
+                }
+            if self._nav_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'A direct navigation goal is already active',
+                }
             self._nav_goal = {
                 **goal_summary,
+                'request_id': request_id,
                 'state': 'SENDING',
                 'sent_at': self._now_iso(),
             }
@@ -3146,30 +5080,62 @@ class VicPinkyGuiNode(Node):
                 ),
             )
 
-        send_future = self._nav_client.send_goal_async(
-            goal_msg,
-            feedback_callback=self._nav_feedback_callback,
-        )
+        try:
+            send_future = self._nav_client.send_goal_async(
+                goal_msg,
+                feedback_callback=self._nav_feedback_callback,
+            )
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
+                    self._nav_goal['state'] = 'SEND_ERROR'
+                    self._nav_goal['error'] = str(exc)
+            return {
+                'ok': False,
+                'status_code': 500,
+                'message': f'Failed to send direct navigation goal: {exc}',
+            }
         goal_handle = self._wait_for_future(send_future)
 
         if goal_handle is None:
             with self._lock:
-                if self._nav_goal is not None:
-                    self._nav_goal['state'] = 'SEND_TIMEOUT'
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
+                    self._nav_goal['state'] = 'SEND_TIMEOUT_PENDING'
                 self._append_event_locked(
                     kind='nav',
                     level='error',
-                    message='Direct nav send timed out',
+                    message=(
+                        'Direct nav send timed out; late resolution is '
+                        'still pending'
+                    ),
                 )
+            send_future.add_done_callback(
+                lambda future: self._nav_late_send_callback(
+                    request_id,
+                    future,
+                )
+            )
             return {
                 'ok': False,
                 'status_code': 504,
-                'message': 'Timed out while sending direct navigation goal',
+                'message': (
+                    'Timed out while sending direct navigation goal; '
+                    'motion remains blocked until late resolution'
+                ),
             }
 
         if not goal_handle.accepted:
             with self._lock:
-                if self._nav_goal is not None:
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
                     self._nav_goal['state'] = 'REJECTED'
                 self._append_event_locked(
                     kind='nav',
@@ -3185,12 +5151,12 @@ class VicPinkyGuiNode(Node):
                 'message': 'Direct navigation goal was rejected',
             }
 
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._nav_result_callback)
-
         with self._lock:
             self._nav_goal_handle = goal_handle
-            if self._nav_goal is not None:
+            if (
+                self._nav_goal is not None
+                and self._nav_goal.get('request_id') == request_id
+            ):
                 self._nav_goal['state'] = 'ACCEPTED'
                 self._nav_goal['accepted_at'] = self._now_iso()
             self._append_event_locked(
@@ -3201,6 +5167,36 @@ class VicPinkyGuiNode(Node):
                     f'{goal_summary["location_name"]}'
                 ),
             )
+
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
+                    self._nav_goal['state'] = 'CANCELING'
+                    self._nav_goal['error'] = str(exc)
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            return {
+                'ok': False,
+                'status_code': 500,
+                'message': (
+                    f'Could not observe direct navigation result: {exc}; '
+                    'goal cancellation requested'
+                ),
+            }
+        result_future.add_done_callback(
+            lambda future: self._nav_result_callback(
+                future,
+                expected_handle=goal_handle,
+                request_id=request_id,
+            )
+        )
 
         return {
             'ok': True,
@@ -3337,7 +5333,98 @@ class VicPinkyGuiNode(Node):
                 'received_at': self._now_iso(),
             }
 
-    def _nav_result_callback(self, future: Any) -> None:
+    def _nav_late_send_callback(
+        self,
+        request_id: str,
+        send_future: Any,
+    ) -> None:
+        try:
+            goal_handle = send_future.result()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
+                    self._nav_goal['state'] = 'SEND_ERROR'
+                    self._nav_goal['error'] = str(exc)
+            return
+
+        if goal_handle is None or not goal_handle.accepted:
+            with self._lock:
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
+                    self._nav_goal['state'] = 'REJECTED'
+            return
+
+        with self._lock:
+            if (
+                self._nav_goal is None
+                or self._nav_goal.get('request_id') != request_id
+            ):
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                return
+            if (
+                self._nav_goal_handle is not None
+                and self._nav_goal_handle is not goal_handle
+            ):
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                return
+            self._nav_goal_handle = goal_handle
+            self._nav_goal['state'] = 'CANCELING'
+            self._nav_goal['accepted_at'] = self._now_iso()
+            self._append_event_locked(
+                kind='nav',
+                level='error',
+                message=(
+                    'Late direct navigation goal accepted; cancellation '
+                    'requested'
+                ),
+            )
+
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
+                    self._nav_goal['error'] = str(exc)
+            result_future = None
+        try:
+            goal_handle.cancel_goal_async()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._nav_goal is not None
+                    and self._nav_goal.get('request_id') == request_id
+                ):
+                    self._nav_goal['error'] = str(exc)
+        if result_future is not None:
+            result_future.add_done_callback(
+                lambda future: self._nav_result_callback(
+                    future,
+                    expected_handle=goal_handle,
+                    request_id=request_id,
+                )
+            )
+
+    def _nav_result_callback(
+        self,
+        future: Any,
+        *,
+        expected_handle: Any | None = None,
+        request_id: str | None = None,
+    ) -> None:
         try:
             result_response = future.result()
         except Exception as exc:
@@ -3363,6 +5450,19 @@ class VicPinkyGuiNode(Node):
             }
 
         with self._lock:
+            if (
+                expected_handle is not None
+                and self._nav_goal_handle is not expected_handle
+            ):
+                return
+            if (
+                request_id is not None
+                and (
+                    self._nav_goal is None
+                    or self._nav_goal.get('request_id') != request_id
+                )
+            ):
+                return
             self._nav_result = result_payload
             self._nav_goal_handle = None
             if self._nav_goal is not None:
@@ -3489,13 +5589,31 @@ class VicPinkyGuiNode(Node):
     def start_mission(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send an ExecuteMission goal from the dashboard."""
         with self._lock:
-            if self._mission_goal_handle is not None:
+            if self._sequence_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Mission start is blocked while a manual sequence '
+                        'is active'
+                    ),
+                }
+            if self._manual_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Mission start is blocked while manual motion is '
+                        'active'
+                    ),
+                }
+            if self._mission_motion_active_locked():
                 return {
                     'ok': False,
                     'status_code': 409,
                     'message': 'A mission goal is already active',
                 }
-            if self._nav_goal_handle is not None:
+            if self._nav_motion_active_locked():
                 return {
                     'ok': False,
                     'status_code': 409,
@@ -3521,9 +5639,44 @@ class VicPinkyGuiNode(Node):
                 'message': str(exc),
             }
 
+        request_id = f'mission-{time.time_ns()}'
         with self._lock:
+            if self._sequence_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Mission start is blocked while a manual sequence '
+                        'is active'
+                    ),
+                }
+            if self._manual_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Mission start is blocked while manual motion is '
+                        'active'
+                    ),
+                }
+            if self._mission_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': 'A mission goal is already active',
+                }
+            if self._nav_motion_active_locked():
+                return {
+                    'ok': False,
+                    'status_code': 409,
+                    'message': (
+                        'Mission start is blocked while direct navigation '
+                        'is active'
+                    ),
+                }
             self._mission_goal = {
                 **goal_summary,
+                'request_id': request_id,
                 'state': 'SENDING',
                 'sent_at': self._now_iso(),
             }
@@ -3535,30 +5688,62 @@ class VicPinkyGuiNode(Node):
                 message=f'Sending mission {goal_summary["mission_id"]}',
             )
 
-        send_future = self._mission_client.send_goal_async(
-            goal_msg,
-            feedback_callback=self._mission_feedback_callback,
-        )
+        try:
+            send_future = self._mission_client.send_goal_async(
+                goal_msg,
+                feedback_callback=self._mission_feedback_callback,
+            )
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
+                    self._mission_goal['state'] = 'SEND_ERROR'
+                    self._mission_goal['error'] = str(exc)
+            return {
+                'ok': False,
+                'status_code': 500,
+                'message': f'Failed to send mission goal: {exc}',
+            }
         goal_handle = self._wait_for_future(send_future)
 
         if goal_handle is None:
             with self._lock:
-                if self._mission_goal is not None:
-                    self._mission_goal['state'] = 'SEND_TIMEOUT'
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
+                    self._mission_goal['state'] = 'SEND_TIMEOUT_PENDING'
                 self._append_event_locked(
                     kind='mission',
                     level='error',
-                    message='Mission send timed out',
+                    message=(
+                        'Mission send timed out; late resolution is still '
+                        'pending'
+                    ),
                 )
+            send_future.add_done_callback(
+                lambda future: self._mission_late_send_callback(
+                    request_id,
+                    future,
+                )
+            )
             return {
                 'ok': False,
                 'status_code': 504,
-                'message': 'Timed out while sending mission goal',
+                'message': (
+                    'Timed out while sending mission goal; motion remains '
+                    'blocked until late resolution'
+                ),
             }
 
         if not goal_handle.accepted:
             with self._lock:
-                if self._mission_goal is not None:
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
                     self._mission_goal['state'] = 'REJECTED'
                 self._append_event_locked(
                     kind='mission',
@@ -3571,12 +5756,12 @@ class VicPinkyGuiNode(Node):
                 'message': 'Mission goal was rejected',
             }
 
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._mission_result_callback)
-
         with self._lock:
             self._mission_goal_handle = goal_handle
-            if self._mission_goal is not None:
+            if (
+                self._mission_goal is not None
+                and self._mission_goal.get('request_id') == request_id
+            ):
                 self._mission_goal['state'] = 'ACCEPTED'
                 self._mission_goal['accepted_at'] = self._now_iso()
             self._append_event_locked(
@@ -3584,6 +5769,36 @@ class VicPinkyGuiNode(Node):
                 level='info',
                 message=f'Mission accepted: {goal_summary["mission_id"]}',
             )
+
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
+                    self._mission_goal['state'] = 'CANCELING'
+                    self._mission_goal['error'] = str(exc)
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            return {
+                'ok': False,
+                'status_code': 500,
+                'message': (
+                    f'Could not observe mission result: {exc}; '
+                    'goal cancellation requested'
+                ),
+            }
+        result_future.add_done_callback(
+            lambda future: self._mission_result_callback(
+                future,
+                expected_handle=goal_handle,
+                request_id=request_id,
+            )
+        )
 
         return {
             'ok': True,
@@ -3621,6 +5836,12 @@ class VicPinkyGuiNode(Node):
             raise ValueError('delivery_location is required')
         if not object_label:
             raise ValueError('object_label is required')
+        if object_label != 'object_1':
+            raise ValueError('the calibrated final scenario supports object_1 only')
+        if pickup_location not in {'402', '402_4f', 'room_402'}:
+            raise ValueError('the calibrated pickup location is 402')
+        if delivery_location != 'object_place':
+            raise ValueError('the calibrated delivery location is object_place')
         allowed_arm_tasks = {
             option['name'] for option in ARM_TASK_OPTIONS
         }
@@ -3663,7 +5884,95 @@ class VicPinkyGuiNode(Node):
                 'received_at': self._now_iso(),
             }
 
-    def _mission_result_callback(self, future: Any) -> None:
+    def _mission_late_send_callback(
+        self,
+        request_id: str,
+        send_future: Any,
+    ) -> None:
+        try:
+            goal_handle = send_future.result()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
+                    self._mission_goal['state'] = 'SEND_ERROR'
+                    self._mission_goal['error'] = str(exc)
+            return
+
+        if goal_handle is None or not goal_handle.accepted:
+            with self._lock:
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
+                    self._mission_goal['state'] = 'REJECTED'
+            return
+
+        with self._lock:
+            if (
+                self._mission_goal is None
+                or self._mission_goal.get('request_id') != request_id
+            ):
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                return
+            if (
+                self._mission_goal_handle is not None
+                and self._mission_goal_handle is not goal_handle
+            ):
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                return
+            self._mission_goal_handle = goal_handle
+            self._mission_goal['state'] = 'CANCELING'
+            self._mission_goal['accepted_at'] = self._now_iso()
+            self._append_event_locked(
+                kind='mission',
+                level='error',
+                message='Late mission goal accepted; cancellation requested',
+            )
+
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
+                    self._mission_goal['error'] = str(exc)
+            result_future = None
+        try:
+            goal_handle.cancel_goal_async()
+        except Exception as exc:
+            with self._lock:
+                if (
+                    self._mission_goal is not None
+                    and self._mission_goal.get('request_id') == request_id
+                ):
+                    self._mission_goal['error'] = str(exc)
+        if result_future is not None:
+            result_future.add_done_callback(
+                lambda future: self._mission_result_callback(
+                    future,
+                    expected_handle=goal_handle,
+                    request_id=request_id,
+                )
+            )
+
+    def _mission_result_callback(
+        self,
+        future: Any,
+        *,
+        expected_handle: Any | None = None,
+        request_id: str | None = None,
+    ) -> None:
         try:
             result_response = future.result()
         except Exception as exc:
@@ -3691,6 +6000,19 @@ class VicPinkyGuiNode(Node):
             }
 
         with self._lock:
+            if (
+                expected_handle is not None
+                and self._mission_goal_handle is not expected_handle
+            ):
+                return
+            if (
+                request_id is not None
+                and (
+                    self._mission_goal is None
+                    or self._mission_goal.get('request_id') != request_id
+                )
+            ):
+                return
             self._mission_result = result_payload
             self._mission_goal_handle = None
             if self._mission_goal is not None:
@@ -3835,6 +6157,27 @@ class VicPinkyGuiNode(Node):
 
     def destroy_node(self) -> bool:
         """Stop the HTTP server before destroying the ROS node."""
+        with self._lock:
+            if self._sequence_active_locked():
+                self._sequence_state['state'] = 'STOPPING'
+                self._sequence_stop_event.set()
+            sequence_handles = [
+                handle
+                for handle in self._manual_goal_handles.values()
+                if handle is not None
+            ]
+            sequence_thread = self._sequence_thread
+        for goal_handle in sequence_handles:
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception as exc:
+                self.get_logger().warning(
+                    f'Failed to cancel sequence goal during shutdown: {exc}'
+                )
+        if sequence_thread is not None and sequence_thread.is_alive():
+            sequence_thread.join(
+                timeout=max(1.0, min(6.0, self._request_timeout_s + 0.5))
+            )
         if self._http_server is not None:
             self._http_server.shutdown()
             self._http_server.server_close()

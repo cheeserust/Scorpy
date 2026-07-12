@@ -21,6 +21,7 @@ class ArucoDetectorNode(Node):
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('marker_size_m', 0.05)
         self.declare_parameter('target_marker_ids', [50, 51, 52, 53, 54, 55])
+        self.declare_parameter('min_stable_frames', 3)
 
         self.image_topic = self.get_parameter('image_topic').value
         self.camera_info_topic = self.get_parameter('camera_info_topic').value
@@ -28,6 +29,11 @@ class ArucoDetectorNode(Node):
         self.target_marker_ids = {
             int(marker_id) for marker_id in self.get_parameter('target_marker_ids').value
         }
+        self.min_stable_frames = max(
+            1,
+            int(self.get_parameter('min_stable_frames').value),
+        )
+        self.stable_counts = {}
 
         self.bridge = CvBridge()
         self.camera_matrix = None
@@ -56,6 +62,11 @@ class ArucoDetectorNode(Node):
 
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100)
         self.aruco_params = cv2.aruco.DetectorParameters()
+        self.aruco_detector = (
+            cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+            if hasattr(cv2.aruco, 'ArucoDetector')
+            else None
+        )
 
         self.get_logger().info('Aruco detector started')
         self.get_logger().info(f'image_topic={self.image_topic}')
@@ -76,11 +87,29 @@ class ArucoDetectorNode(Node):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
-        corners, ids, _ = detector.detectMarkers(gray)
+        if self.aruco_detector is not None:
+            corners, ids, _ = self.aruco_detector.detectMarkers(gray)
+        else:
+            # Ubuntu 24.04/Jazzy ships OpenCV 4.6, before ArucoDetector.
+            corners, ids, _ = cv2.aruco.detectMarkers(
+                gray,
+                self.aruco_dict,
+                parameters=self.aruco_params,
+            )
 
         if ids is None:
+            self.stable_counts.clear()
             return
+
+        visible_ids = {int(value) for value in ids.flatten()}
+        for marker_id in set(self.stable_counts) | visible_ids:
+            if marker_id in visible_ids:
+                self.stable_counts[marker_id] = min(
+                    self.min_stable_frames,
+                    self.stable_counts.get(marker_id, 0) + 1,
+                )
+            else:
+                self.stable_counts.pop(marker_id, None)
 
         s = self.marker_size / 2.0
         object_points = np.array([
@@ -93,6 +122,8 @@ class ArucoDetectorNode(Node):
         for marker_corners, marker_id_raw in zip(corners, ids.flatten()):
             marker_id = int(marker_id_raw)
             if marker_id not in self.target_marker_ids:
+                continue
+            if self.stable_counts.get(marker_id, 0) < self.min_stable_frames:
                 continue
 
             image_points = marker_corners[0].astype(np.float64)

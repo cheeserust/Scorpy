@@ -31,6 +31,14 @@ servers:
       - place
       - release
 
+  /arm/execute:
+    delay_sec: 1.0
+    success: true
+    phases:
+      - start
+      - execute
+      - complete
+
   /arm/press_button:
     delay_sec: 3.0
     success: true
@@ -86,3 +94,18 @@ servers:
       - load_map
       - set_initial_pose
       - map_ready
+
+  /base/drive_straight:
+    delay_sec: 1.0
+    success: true
+    phases:
+      - wait_delay
+      - driving
+      - stopped
+
+  /base/rotate:
+    delay_sec: 1.0
+    success: true
+    phases:
+      - rotating
+      - stopped
