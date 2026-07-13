@@ -34,8 +34,9 @@ mission:
       target: elevator_panel_4f
       location: elevator_panel_4f
       extra:
-        target_distance_m: 1.37
+        target_distance_m: 1.27
         target_lateral_m: 0.0
+        aligned_hold_sec: 3.0
 
     - state: PRESS_ELEVATOR_CALL_BUTTON
       task: press_button
@@ -76,7 +77,7 @@ mission:
       target: elevator_board
       location: inside_elevator_4f
       extra:
-        target_distance_cm: 35.0
+        target_distance_cm: 50.0
 
     - state: PRESS_5F_BUTTON
       task: press_button
@@ -97,6 +98,9 @@ mission:
       task: exit_elevator
       target: elevator_exit_5f
       location: floor_5_marker
+      extra:
+        # Only the landing marker/wall (ID 5): keep 10 cm more clearance.
+        exit_target_distance_cm: 70.0
 
     # Pinky map switching is intentionally after physical exit.
     - state: SWITCH_5F_MAP
@@ -108,6 +112,9 @@ mission:
       task: go_to
       target: "$delivery_location"
       location: "$delivery_location"
+      extra:
+        # Allow AMCL/TF/global costmap to settle after SWITCH_5F_MAP.
+        start_delay_sec: 3.0
 
     - state: ROTATE_AT_DELIVERY
       task: base_rotate
@@ -134,8 +141,9 @@ mission:
       target: elevator_panel_5f
       location: elevator_panel_5f
       extra:
-        target_distance_m: 1.37
+        target_distance_m: 1.27
         target_lateral_m: 0.0
+        aligned_hold_sec: 3.0
 
     - state: PRESS_ELEVATOR_CALL_BUTTON_RETURN
       task: press_button
@@ -174,7 +182,7 @@ mission:
       target: elevator_board
       location: inside_elevator_5f
       extra:
-        target_distance_cm: 35.0
+        target_distance_cm: 50.0
 
     - state: PRESS_4F_BUTTON
       task: press_button
@@ -195,6 +203,9 @@ mission:
       task: exit_elevator
       target: elevator_exit_4f
       location: floor_4_marker
+      extra:
+        # Only the landing marker/wall (ID 4): keep 10 cm more clearance.
+        exit_target_distance_cm: 70.0
 
     - state: SWITCH_4F_MAP
       task: map_switch
@@ -205,3 +216,6 @@ mission:
       task: go_to
       target: "$pickup_location"
       location: "$pickup_location"
+      extra:
+        # Allow AMCL/TF/global costmap to settle after SWITCH_4F_MAP.
+        start_delay_sec: 3.0

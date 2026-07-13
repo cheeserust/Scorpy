@@ -71,6 +71,8 @@ const $ = (id) => document.getElementById(id);
 
 const API_DEFAULT_TIMEOUT_MS = 5000;
 const SNAPSHOT_TIMEOUT_MS = 2000;
+const HOME_COMMAND_TIMEOUT_MS = 190000;
+const CLEAR_COMMAND_TIMEOUT_MS = 20000;
 const OFFLINE_FAILURE_THRESHOLD = 2;
 
 const apiErrorMessage = (data, status) => {
@@ -487,7 +489,7 @@ const renderManualControllerControls = (controller) => {
 
   grid.innerHTML = joints
     .map((joint) => {
-      const value = Number(joint.default_deg ?? 0).toFixed(1);
+      const value = formatAngleInput(joint.default_deg ?? 0);
       return `
         <div class="manual-control-row">
           <div class="manual-control-label">
@@ -521,7 +523,7 @@ const renderManualControllerControls = (controller) => {
     const number = $(`manual-${controller}-${joint.key}-number`);
     const sync = (source) => {
       const safe = clampManualValue(source.value, joint);
-      const formatted = safe.toFixed(1);
+      const formatted = formatAngleInput(safe);
       range.value = formatted;
       number.value = formatted;
       state.manualDirty[controller] = true;
@@ -540,13 +542,20 @@ const clampManualValue = (value, joint) => {
   return clamp(Number.isFinite(numeric) ? numeric : fallback, min, max);
 };
 
+const formatAngleInput = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "0";
+  const rounded = Math.round(numeric * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+};
+
 const setManualControlValue = (controller, joint, valueDeg) => {
   const range = $(`manual-${controller}-${joint.key}-range`);
   const number = $(`manual-${controller}-${joint.key}-number`);
   if (!range || !number) return;
 
   const safe = clampManualValue(valueDeg, joint);
-  const formatted = safe.toFixed(1);
+  const formatted = formatAngleInput(safe);
   range.value = formatted;
   number.value = formatted;
 };
@@ -696,7 +705,7 @@ const renderManualStatus = (manual) => {
   }
 
   $("sendArmManualButton").disabled =
-    !armConfigured || missionActive || sequenceActive || !armReady || arm.active || state.manualSending.arm;
+    !armConfigured || missionActive || sequenceActive || !armReady || state.manualSending.arm;
   $("sendGripperManualButton").disabled =
     !gripperConfigured || missionActive || sequenceActive || !gripperReady || gripper.active || state.manualSending.gripper;
 
@@ -1710,15 +1719,26 @@ const poll = async () => {
 };
 
 const postArmCommand = async (command, payload = {}) => {
-  const buttons = document.querySelectorAll("[data-arm-command], #statusButton, #estopTopButton");
+  const buttons = Array.from(
+    document.querySelectorAll("[data-arm-command], #statusButton, #estopTopButton"),
+  ).filter((button) => (
+    button.id !== "estopTopButton"
+    && button.dataset.armCommand !== "estop"
+  ));
   buttons.forEach((button) => {
     button.disabled = true;
   });
 
   try {
+    const timeoutMs = command === "home_all"
+      ? HOME_COMMAND_TIMEOUT_MS
+      : command === "clear_error"
+        ? CLEAR_COMMAND_TIMEOUT_MS
+        : API_DEFAULT_TIMEOUT_MS;
     await api(`/api/arm/${command}`, {
       method: "POST",
       body: JSON.stringify(payload),
+      timeoutMs,
     });
     await poll();
   } catch (error) {
@@ -1758,6 +1778,11 @@ const sendManual = async (controller) => {
   const payload = {
     positions_deg: readManualPositions(controller),
     duration_sec: Number($(dom.duration).value),
+    request_id: (
+      globalThis.crypto?.randomUUID?.()
+      || `manual-${controller}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    ),
+    client_created_unix_ms: Date.now(),
   };
   if (controller === "gripper") {
     payload.target_load_raw = Number($("manualGripperLoad").value);
@@ -1946,6 +1971,57 @@ const openEditPoseDialog = (pose) => {
   $("editPoseId").value = String(pose.id);
   $("editPoseName").value = pose.name || "";
   $("editPoseDwell").value = String(pose.dwell_sec ?? 0);
+  $("editPoseControllers").innerHTML = ["arm", "gripper"]
+    .map((controller) => {
+      const config = state.manualConfigs[controller];
+      const joints = Array.isArray(config?.joints) ? config.joints : [];
+      const stored = pose.controllers?.[controller];
+      const positions = stored?.positions_deg || {};
+      if (!stored || !joints.length) return "";
+      const title = controller === "arm" ? "로봇팔 각도" : "그리퍼 각도";
+      const targetLoad = stored.target_load_raw ?? config.default_target_load_raw ?? 500;
+      const targetLoadMax = config.target_load_max ?? 1023;
+      return `
+        <fieldset class="edit-pose-controller">
+          <legend>${title}</legend>
+          ${joints.map((joint) => {
+            const value = formatAngleInput(
+              positions[joint.joint_name] ?? positions[joint.key] ?? joint.default_deg ?? 0,
+            );
+            return `
+              <label>
+                ${escapeHtml(joint.label || joint.joint_name)} (°)
+                <input
+                  type="number"
+                  min="${escapeHtml(joint.min_deg)}"
+                  max="${escapeHtml(joint.max_deg)}"
+                  step="0.1"
+                  value="${escapeHtml(value)}"
+                  data-edit-pose-controller="${escapeHtml(controller)}"
+                  data-edit-pose-joint="${escapeHtml(joint.joint_name)}"
+                  required
+                >
+              </label>
+            `;
+          }).join("")}
+          ${controller === "gripper" ? `
+            <label>
+              부하값
+              <input
+                type="number"
+                min="0"
+                max="${escapeHtml(targetLoadMax)}"
+                step="1"
+                value="${escapeHtml(targetLoad)}"
+                data-edit-pose-load
+                required
+              >
+            </label>
+          ` : ""}
+        </fieldset>
+      `;
+    })
+    .join("");
   $("editPoseDialog").showModal();
   $("editPoseName").focus();
 };
@@ -2048,11 +2124,30 @@ const submitEditPose = async (event) => {
   renderSavedPoseTable();
   $("editPoseSubmitButton").disabled = true;
   try {
+    const original = state.savedPoses.find((pose) => Number(pose.id) === originalId) || {};
+    const controllers = JSON.parse(JSON.stringify(original.controllers || {}));
+    document.querySelectorAll("[data-edit-pose-controller][data-edit-pose-joint]").forEach((input) => {
+      const controller = input.dataset.editPoseController;
+      const joint = input.dataset.editPoseJoint;
+      const value = Number(input.value);
+      if (!Number.isFinite(value)) {
+        throw new Error(`${joint} 각도를 확인해 주세요.`);
+      }
+      controllers[controller].positions_deg[joint] = value;
+    });
+    const loadInput = document.querySelector("[data-edit-pose-load]");
+    if (loadInput) {
+      const value = Number(loadInput.value);
+      const maxValue = Number(loadInput.max || 1023);
+      if (!Number.isInteger(value) || value < 0 || value > maxValue) {
+        throw new Error(`부하값은 0~${maxValue} 정수로 입력해 주세요.`);
+      }
+      controllers.gripper.target_load_raw = value;
+    }
     const data = await api(`/api/manual/poses/${encodeURIComponent(originalId)}`, {
       method: "PATCH",
-      body: JSON.stringify({ id, name, dwell_sec: dwellSec }),
+      body: JSON.stringify({ id, name, dwell_sec: dwellSec, controllers }),
     });
-    const original = state.savedPoses.find((pose) => Number(pose.id) === originalId) || {};
     state.savedPoses = state.savedPoses.filter((pose) => Number(pose.id) !== originalId);
     upsertSavedPose(data.pose || { ...original, id, name, dwell_sec: dwellSec });
     if (Number.isInteger(Number(data.next_id)) && Number(data.next_id) > 0) {
@@ -2060,7 +2155,7 @@ const submitEditPose = async (event) => {
     }
     $("editPoseDialog").close("saved");
     setSavedPoseStatus(`자세 ${id} 수정 완료`);
-    setManualNotice(`저장 자세 ${id}의 이름과 대기시간을 수정했습니다.`);
+    setManualNotice(`저장 자세 ${id}의 이름, 대기시간, 각도와 부하값을 수정했습니다.`);
   } catch (error) {
     setSavedPoseStatus(`수정 실패: ${error.message}`, true);
     setManualNotice(`저장 자세 오류 | ${error.message}`);

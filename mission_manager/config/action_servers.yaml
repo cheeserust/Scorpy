@@ -59,6 +59,12 @@ actions:
     timeout_sec: 90.0
     retry: 0
 
+  base_drive_straight:
+    server: /base/drive_straight
+    task_id: drive_straight
+    timeout_sec: 30.0
+    retry: 0
+
   base_rotate:
     server: /base/rotate
     task_id: rotate
@@ -82,3 +88,10 @@ actions:
     task_id: map_switch
     timeout_sec: 30.0
     retry: 1
+
+  operator_confirm:
+    server: /operator/confirm
+    task_id: operator_confirm
+    # Intentional infinite wait. Mission Cancel still cancels this action.
+    timeout_sec: .inf
+    retry: 0

@@ -51,7 +51,7 @@ from std_srvs.srv import Trigger
 from tf2_geometry_msgs import do_transform_pose
 from tf2_ros import Buffer, TransformListener
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from vicpinky_interfaces.action import RunTask
+from vicpinky_interfaces.action import ExecuteArmGoal, RunTask
 from vicpinky_interfaces.msg import DetectedMarker
 
 
@@ -121,8 +121,8 @@ class TaskExecutorNode(Node):
 
         self.arm_client = ActionClient(
             self,
-            FollowJointTrajectory,
-            '/arm_controller/follow_joint_trajectory',
+            ExecuteArmGoal,
+            '/arm_controller/execute_joint_goal',
             callback_group=self._callback_group,
         )
         self.gripper_client = ActionClient(
@@ -773,9 +773,9 @@ class TaskExecutorNode(Node):
                 float(value) for value in pose['positions_rad']
             ]
             return
-        self._execute_follow_trajectory(
-            self.arm_client,
-            trajectory,
+        self._execute_direct_arm_goal(
+            pose['positions_rad'],
+            float(pose.get('duration_sec', 3.0)),
             f'arm named pose {name}',
         )
 
@@ -1166,6 +1166,27 @@ class TaskExecutorNode(Node):
                 f'message={result.error_string}'
             )
 
+    def _execute_direct_arm_goal(
+        self,
+        positions: Sequence[float],
+        duration_sec: float,
+        label: str,
+    ) -> None:
+        if len(positions) != len(self.arm_joint_names):
+            raise TaskFailure(f'{label} position count does not match joints')
+        duration_ms = round(float(duration_sec) * 1000.0)
+        if not 1 <= duration_ms <= 0xFFFF:
+            raise TaskFailure(f'{label} duration must be 1..65535 ms')
+        goal = ExecuteArmGoal.Goal()
+        goal.joint_names = list(self.arm_joint_names)
+        goal.positions = [float(value) for value in positions]
+        goal.duration_ms = int(duration_ms)
+        response = self._send_action_goal(self.arm_client, goal, label)
+        if not response.result.success:
+            raise TaskFailure(
+                f'{label} failed: {response.result.message}'
+            )
+
     def apply_pose_correction(self, pose: Any):
         correction = self.waypoint_cfg.get('global', {}).get(
             'marker_pose_correction_m'
@@ -1289,10 +1310,11 @@ class TaskExecutorNode(Node):
         trajectory = self.plan_pose(target_pose, label, pose_link=pose_link)
         if not self.execute_plans:
             return
-        self._execute_follow_trajectory(
-            self.arm_client,
-            trajectory,
-            f'planned arm {label}',
+        del trajectory
+        raise TaskFailure(
+            'MoveIt waypoint execution is disabled by the Board1/2 V3 '
+            'contract. Configure a validated direct joint pose for '
+            f'{label}; a planned trajectory endpoint is not reused.'
         )
 
     def plan_pose(

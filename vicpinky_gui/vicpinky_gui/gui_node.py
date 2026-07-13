@@ -33,7 +33,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectoryPoint
-from vicpinky_interfaces.action import ExecuteMission, RunTask
+from vicpinky_interfaces.action import ExecuteArmGoal, ExecuteMission, RunTask
 from vicpinky_interfaces.msg import MissionStatus
 from werkzeug.serving import make_server
 import yaml
@@ -281,7 +281,8 @@ GRIPPER_MANUAL_JOINTS = [
 MANUAL_CONTROLLERS = {
     'arm': {
         'label': 'Arm',
-        'action_name': '/arm_controller/follow_joint_trajectory',
+        'action_name': '/arm_controller/execute_joint_goal',
+        'interface': 'direct_arm_v3',
         'default_duration_sec': 2.0,
         'joints': ARM_MANUAL_JOINTS,
     },
@@ -326,6 +327,12 @@ class VicPinkyGuiNode(Node):
         )
         self._request_timeout_s = float(
             self.get_parameter('request_timeout_sec').value
+        )
+        self._home_service_timeout_s = float(
+            self.get_parameter('home_service_timeout_sec').value
+        )
+        self._clear_service_timeout_s = float(
+            self.get_parameter('clear_service_timeout_sec').value
         )
         self._status_log_limit = int(
             self.get_parameter('status_log_limit').value
@@ -378,7 +385,18 @@ class VicPinkyGuiNode(Node):
         self._sequence_step_timeout_margin_s = (
             sequence_margin
             if math.isfinite(sequence_margin) and sequence_margin >= 0.0
-            else 5.0
+            else 30.0
+        )
+        sequence_result_timeout = float(
+            self.get_parameter('sequence_step_result_timeout_sec').value
+        )
+        self._sequence_step_result_timeout_s = (
+            sequence_result_timeout
+            if (
+                math.isfinite(sequence_result_timeout)
+                and sequence_result_timeout > 0.0
+            )
+            else 120.0
         )
         self._sequence_state = self._idle_sequence_state()
         self._sequence_thread: threading.Thread | None = None
@@ -407,6 +425,19 @@ class VicPinkyGuiNode(Node):
             name: None for name in self._manual_controllers
         }
         self._manual_feedback: dict[str, dict[str, Any] | None] = {
+            name: None for name in self._manual_controllers
+        }
+        self._manual_pending_latest_targets: dict[
+            str, dict[str, Any] | None
+        ] = {
+            name: None for name in self._manual_controllers
+        }
+        self._manual_dispatching_latest_targets: dict[
+            str, dict[str, Any] | None
+        ] = {
+            name: None for name in self._manual_controllers
+        }
+        self._manual_cancel_requested: dict[str, str | None] = {
             name: None for name in self._manual_controllers
         }
         self._robot_connection_state = 'WAITING'
@@ -465,7 +496,11 @@ class VicPinkyGuiNode(Node):
         self._manual_clients = {
             name: ActionClient(
                 self,
-                FollowJointTrajectory,
+                (
+                    ExecuteArmGoal
+                    if config.get('interface') == 'direct_arm_v3'
+                    else FollowJointTrajectory
+                ),
                 str(config['action_name']),
                 callback_group=self._callback_group,
             )
@@ -592,6 +627,8 @@ class VicPinkyGuiNode(Node):
         self.declare_parameter('auto_port', True)
         self.declare_parameter('port_search_limit', 20)
         self.declare_parameter('request_timeout_sec', 5.0)
+        self.declare_parameter('home_service_timeout_sec', 185.0)
+        self.declare_parameter('clear_service_timeout_sec', 15.0)
         self.declare_parameter('status_log_limit', 80)
         self.declare_parameter('connection_timeout_sec', 5.0)
         self.declare_parameter('recovered_hold_sec', 5.0)
@@ -609,7 +646,11 @@ class VicPinkyGuiNode(Node):
         self.declare_parameter('enable_manual_arm', True)
         self.declare_parameter('enable_manual_gripper', True)
         self.declare_parameter('saved_pose_file', '')
-        self.declare_parameter('sequence_step_timeout_margin_sec', 5.0)
+        # Physical motion can finish noticeably later than the trajectory's
+        # requested duration on a slow, load-limited robot. Keep a generous
+        # result margin while preserving immediate stop/cancel handling.
+        self.declare_parameter('sequence_step_timeout_margin_sec', 30.0)
+        self.declare_parameter('sequence_step_result_timeout_sec', 120.0)
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('amcl_pose_topic', '/amcl_pose')
         self.declare_parameter('odom_topic', '/odom')
@@ -689,7 +730,8 @@ class VicPinkyGuiNode(Node):
                         f'bridge config is missing {joint["joint_name"]}'
                     )
                 minimum_deg, maximum_deg, home_deg = (
-                    math.degrees(float(value)) for value in values
+                    round(math.degrees(float(value)), 1)
+                    for value in values
                 )
                 joint['min_deg'] = minimum_deg
                 joint['max_deg'] = maximum_deg
@@ -2171,6 +2213,9 @@ class VicPinkyGuiNode(Node):
             nav_active = self._nav_motion_active_locked()
             manual_last_commands = deepcopy(self._manual_last_commands)
             manual_feedback = deepcopy(self._manual_feedback)
+            manual_latest_target = (
+                self._manual_latest_target_snapshot_locked()
+            )
             manual_sequence = deepcopy(self._sequence_state)
             manual_motion_active = self._manual_motion_active_locked()
             manual_active = {
@@ -2213,12 +2258,14 @@ class VicPinkyGuiNode(Node):
 
         manual_controllers = {}
         for name, config in self._manual_controllers.items():
+            target_diagnostics = manual_latest_target['controllers'][name]
             manual_controllers[name] = {
                 'label': config['label'],
                 'action_name': config['action_name'],
                 'mode': config.get('mode', name),
                 'ready': self._manual_action_ready(name),
                 'active': manual_active.get(name, False),
+                **target_diagnostics,
             }
 
         elevator_button_task = self._elevator_button_task_snapshot(
@@ -2269,6 +2316,7 @@ class VicPinkyGuiNode(Node):
                 'feedback': manual_feedback,
                 'mission_active': mission_active,
                 'sequence': manual_sequence,
+                'latest_target': manual_latest_target,
             },
             'joints': {
                 'state': joint_state,
@@ -2914,15 +2962,16 @@ class VicPinkyGuiNode(Node):
         pose_id: int,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Update ID, human-readable name, and dwell duration."""
-        allowed = {'id', 'name', 'dwell_sec'}
+        """Update saved-pose metadata and controller angles."""
+        allowed = {'id', 'name', 'dwell_sec', 'controllers'}
         unknown = sorted(set(payload) - allowed)
         if unknown:
             return {
                 'ok': False,
                 'status_code': 400,
                 'message': (
-                    'Only id, name and dwell_sec may be updated; unexpected: '
+                    'Only id, name, dwell_sec and controllers may be updated; '
+                    'unexpected: '
                     + ', '.join(unknown)
                 ),
             }
@@ -2930,12 +2979,17 @@ class VicPinkyGuiNode(Node):
             return {
                 'ok': False,
                 'status_code': 400,
-                'message': 'At least one of id, name or dwell_sec is required',
+                'message': (
+                    'At least one of id, name, dwell_sec or controllers '
+                    'is required'
+                ),
             }
 
         try:
             changes: dict[str, Any] = {}
             new_pose_id = None
+            store = self._pose_store()
+            current_pose = store.get(pose_id)
             if 'id' in payload:
                 new_pose_id = self._saved_pose_id(payload['id'])
             if 'name' in payload:
@@ -2944,7 +2998,18 @@ class VicPinkyGuiNode(Node):
                 changes['dwell_sec'] = self._saved_pose_dwell(
                     payload['dwell_sec']
                 )
-            store = self._pose_store()
+            if 'controllers' in payload:
+                normalized = self._normalize_saved_pose_fields(
+                    {
+                        'name': payload.get('name', current_pose['name']),
+                        'dwell_sec': payload.get(
+                            'dwell_sec', current_pose['dwell_sec']
+                        ),
+                        'controllers': payload['controllers'],
+                    },
+                    require_canonical_positions=True,
+                )
+                changes['controllers'] = normalized['controllers']
             pose = store.update(pose_id, changes, new_pose_id)
             next_id = store.snapshot()['next_id']
         except (TypeError, ValueError) as exc:
@@ -3140,10 +3205,66 @@ class VicPinkyGuiNode(Node):
         with self._lock:
             return deepcopy(self._sequence_state)
 
+    def manual_latest_target_snapshot(self) -> dict[str, Any]:
+        """Return latest-target-wins queue and cancel diagnostics."""
+        with self._lock:
+            return self._manual_latest_target_snapshot_locked()
+
+    def _ensure_manual_latest_target_state_locked(self) -> None:
+        """Initialize queue state for nodes built without ``__init__``."""
+        controller_names = tuple(self._manual_controllers)
+        if not hasattr(self, '_manual_pending_latest_targets'):
+            self._manual_pending_latest_targets = {
+                name: None for name in controller_names
+            }
+        if not hasattr(self, '_manual_dispatching_latest_targets'):
+            self._manual_dispatching_latest_targets = {
+                name: None for name in controller_names
+            }
+        if not hasattr(self, '_manual_cancel_requested'):
+            self._manual_cancel_requested = {
+                name: None for name in controller_names
+            }
+        for name in controller_names:
+            self._manual_pending_latest_targets.setdefault(name, None)
+            self._manual_dispatching_latest_targets.setdefault(name, None)
+            self._manual_cancel_requested.setdefault(name, None)
+
+    @staticmethod
+    def _manual_pending_diagnostic(
+        entry: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if entry is None:
+            return None
+        return {
+            'target': deepcopy(entry['summary']),
+            'queued_at': entry['queued_at'],
+            'request_id': entry['request_id'],
+        }
+
+    def _manual_latest_target_snapshot_locked(self) -> dict[str, Any]:
+        self._ensure_manual_latest_target_state_locked()
+        controllers: dict[str, Any] = {}
+        for name in self._manual_controllers:
+            pending = self._manual_pending_latest_targets.get(name)
+            dispatching = self._manual_dispatching_latest_targets.get(name)
+            controllers[name] = {
+                'pending_latest_target': self._manual_pending_diagnostic(
+                    pending if pending is not None else dispatching
+                ),
+                'cancel_requested': (
+                    self._manual_cancel_requested.get(name) is not None
+                ),
+                'cancel_command_id': self._manual_cancel_requested.get(name),
+                'dispatching_latest_target': dispatching is not None,
+            }
+        return {'controllers': controllers}
+
     def _sequence_active_locked(self) -> bool:
         return self._sequence_state.get('state') in SEQUENCE_ACTIVE_STATES
 
     def _manual_motion_active_locked(self) -> bool:
+        self._ensure_manual_latest_target_state_locked()
         for controller, handle in self._manual_goal_handles.items():
             if handle is not None:
                 return True
@@ -3151,6 +3272,13 @@ class VicPinkyGuiNode(Node):
                 self._manual_last_commands.get(controller) or {}
             ).get('state')
             if state in ACTION_BLOCKING_STATES:
+                return True
+            if self._manual_pending_latest_targets.get(controller) is not None:
+                return True
+            if (
+                self._manual_dispatching_latest_targets.get(controller)
+                is not None
+            ):
                 return True
         return False
 
@@ -3820,7 +3948,10 @@ class VicPinkyGuiNode(Node):
             accepted,
             result_futures,
             stop_event,
-            max_duration + self._sequence_step_timeout_margin_s,
+            max(
+                self._sequence_step_result_timeout_s,
+                max_duration + self._sequence_step_timeout_margin_s,
+            ),
         )
 
     def _wait_for_sequence_results(
@@ -3847,7 +3978,10 @@ class VicPinkyGuiNode(Node):
                 if not future.done():
                     continue
                 pending.remove(controller)
-                result_payload = self._sequence_result_payload(future)
+                result_payload = self._sequence_result_payload(
+                    future,
+                    controller,
+                )
                 results[controller] = result_payload
                 self._record_sequence_controller_result(
                     run_id,
@@ -3881,7 +4015,10 @@ class VicPinkyGuiNode(Node):
                         time.monotonic() + self._request_timeout_s
                     )
             elif failure_error is None and time.monotonic() >= deadline:
-                failure_error = 'Sequence step result timed out'
+                failure_error = (
+                    f'Sequence step result timed out after '
+                    f'{max(0.1, timeout_sec):.1f}s'
+                )
                 self._cancel_active_sequence_goals(run_id)
                 cancellation_deadline = (
                     time.monotonic() + self._request_timeout_s
@@ -4016,7 +4153,7 @@ class VicPinkyGuiNode(Node):
             pose_id,
             controller,
             goal_handle,
-            self._sequence_result_payload(future),
+            self._sequence_result_payload(future, controller),
         )
 
     def _cancel_and_drain_sequence_handles(
@@ -4059,7 +4196,7 @@ class VicPinkyGuiNode(Node):
                     pose_id,
                     controller,
                     handles[controller],
-                    self._sequence_result_payload(future),
+                    self._sequence_result_payload(future, controller),
                 )
             if pending:
                 time.sleep(0.01)
@@ -4073,7 +4210,11 @@ class VicPinkyGuiNode(Node):
         )
         return unresolved
 
-    def _sequence_result_payload(self, future: Any) -> dict[str, Any]:
+    def _sequence_result_payload(
+        self,
+        future: Any,
+        controller: str,
+    ) -> dict[str, Any]:
         try:
             result_response = future.result()
             result = result_response.result
@@ -4081,12 +4222,30 @@ class VicPinkyGuiNode(Node):
                 result_response.status,
                 f'STATUS_{result_response.status}',
             )
-            error_code = int(result.error_code)
-            error_string = str(result.error_string)
-            ok = (
-                result_response.status == GoalStatus.STATUS_SUCCEEDED
-                and error_code == FollowJointTrajectory.Result.SUCCESSFUL
-            )
+            if controller == 'arm':
+                error_code = None
+                arm_success = bool(getattr(
+                    result,
+                    'success',
+                    getattr(result, 'error_code', 1) == 0,
+                ))
+                error_string = str(getattr(
+                    result,
+                    'message',
+                    getattr(result, 'error_string', ''),
+                ))
+                ok = (
+                    result_response.status == GoalStatus.STATUS_SUCCEEDED
+                    and arm_success
+                )
+            else:
+                error_code = int(result.error_code)
+                error_string = str(result.error_string)
+                ok = (
+                    result_response.status == GoalStatus.STATUS_SUCCEEDED
+                    and error_code
+                    == FollowJointTrajectory.Result.SUCCESSFUL
+                )
         except Exception as exc:
             status_name = 'ERROR'
             error_code = None
@@ -4372,7 +4531,12 @@ class VicPinkyGuiNode(Node):
             return result
 
         future = client.call_async(Trigger.Request())
-        response = self._wait_for_future(future)
+        timeout_s = self._request_timeout_s
+        if command == 'home_all':
+            timeout_s = self._home_service_timeout_s
+        elif command == 'clear_error':
+            timeout_s = self._clear_service_timeout_s
+        response = self._wait_for_future(future, timeout_s=timeout_s)
 
         if response is None:
             result = {
@@ -4412,7 +4576,7 @@ class VicPinkyGuiNode(Node):
         controller: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Send one manual FollowJointTrajectory goal from the dashboard."""
+        """Send or coalesce one dashboard manual target."""
         controller = str(controller)
         config = self._manual_controllers.get(controller)
         client = self._manual_clients.get(controller)
@@ -4423,36 +4587,52 @@ class VicPinkyGuiNode(Node):
                 'message': f'Unknown manual controller: {controller}',
             }
 
+        gui_received_unix_ms = time.time_ns() // 1_000_000
+        request_id = str(
+            payload.get('request_id')
+            or f'manual-{controller}-{time.time_ns()}'
+        )
+        try:
+            web_created_unix_ms = int(
+                payload.get('client_created_unix_ms')
+                or gui_received_unix_ms
+            )
+        except (TypeError, ValueError):
+            web_created_unix_ms = gui_received_unix_ms
+        try:
+            goal_msg, summary = self._manual_goal_from_payload(
+                controller,
+                payload,
+            )
+        except (TypeError, ValueError) as exc:
+            return {
+                'ok': False,
+                'status_code': 400,
+                'message': str(exc),
+            }
+        summary['request_id'] = request_id
+        summary['web_created_unix_ms'] = web_created_unix_ms
+        summary['gui_received_unix_ms'] = gui_received_unix_ms
+        for field_name, value in (
+            ('request_id', request_id),
+            ('web_created_unix_ms', web_created_unix_ms),
+            ('gui_received_unix_ms', gui_received_unix_ms),
+        ):
+            if hasattr(goal_msg, field_name):
+                setattr(goal_msg, field_name, value)
+
+        normalized_payload = self._manual_payload_from_summary(summary)
         with self._lock:
-            if self._sequence_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': (
-                        'Manual control is blocked while a sequence is active'
-                    ),
-                }
-            if self._manual_motion_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': 'Another manual motion is still active',
-                }
-            if self._mission_motion_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': 'Manual control is blocked while a mission is active',
-                }
-            if self._nav_motion_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': (
-                        'Manual control is blocked while direct navigation '
-                        'is active'
-                    ),
-                }
+            admission = self._manual_admission_locked(
+                controller,
+                normalized_payload,
+                summary,
+            )
+        if admission is not None:
+            response, cancel_request = admission
+            if cancel_request is not None:
+                self._request_manual_replacement_cancel(*cancel_request)
+            return response
 
         if not self._manual_action_ready(controller):
             client.wait_for_server(timeout_sec=0.25)
@@ -4466,61 +4646,290 @@ class VicPinkyGuiNode(Node):
                 ),
             }
 
-        try:
-            goal_msg, summary = self._manual_goal_from_payload(
-                controller,
-                payload,
-            )
-        except (TypeError, ValueError) as exc:
+        response = self._start_manual_goal(
+            controller,
+            normalized_payload,
+            goal_msg,
+            summary,
+        )
+        if response is None:
             return {
                 'ok': False,
-                'status_code': 400,
-                'message': str(exc),
+                'status_code': 409,
+                'message': 'Manual target was superseded before dispatch',
             }
+        return response
 
-        command_id = f'manual-{controller}-{time.time_ns()}'
-        with self._lock:
-            if self._sequence_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': (
-                        'Manual control is blocked while a sequence is active'
+    @staticmethod
+    def _manual_payload_from_summary(
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = {
+            'positions_deg': deepcopy(summary['positions_deg']),
+            'duration_sec': float(summary['duration_sec']),
+        }
+        if 'target_load_raw' in summary:
+            payload['target_load_raw'] = int(summary['target_load_raw'])
+        for field_name in (
+            'request_id',
+            'web_created_unix_ms',
+            'gui_received_unix_ms',
+        ):
+            if field_name in summary:
+                payload[field_name] = summary[field_name]
+        return payload
+
+    @staticmethod
+    def _manual_targets_equal(
+        first: dict[str, Any] | None,
+        second: dict[str, Any] | None,
+    ) -> bool:
+        if first is None or second is None:
+            return False
+        return (
+            first.get('controller') == second.get('controller')
+            and first.get('joint_names') == second.get('joint_names')
+            and first.get('positions_deg') == second.get('positions_deg')
+            and first.get('duration_sec') == second.get('duration_sec')
+            and first.get('target_load_raw')
+            == second.get('target_load_raw')
+        )
+
+    def _manual_admission_locked(
+        self,
+        controller: str,
+        payload: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> tuple[
+        dict[str, Any],
+        tuple[str, str, Any] | None,
+    ] | None:
+        if self._sequence_active_locked():
+            return ({
+                'ok': False,
+                'status_code': 409,
+                'message': (
+                    'Manual control is blocked while a sequence is active'
+                ),
+            }, None)
+        if self._mission_motion_active_locked():
+            return ({
+                'ok': False,
+                'status_code': 409,
+                'message': 'Manual control is blocked while a mission is active',
+            }, None)
+        if self._nav_motion_active_locked():
+            return ({
+                'ok': False,
+                'status_code': 409,
+                'message': (
+                    'Manual control is blocked while direct navigation '
+                    'is active'
+                ),
+            }, None)
+
+        self._ensure_manual_latest_target_state_locked()
+        active_controllers = []
+        for name, handle in self._manual_goal_handles.items():
+            command_state = (
+                self._manual_last_commands.get(name) or {}
+            ).get('state')
+            if (
+                handle is not None
+                or command_state in ACTION_BLOCKING_STATES
+                or self._manual_pending_latest_targets.get(name) is not None
+                or self._manual_dispatching_latest_targets.get(name)
+                is not None
+            ):
+                active_controllers.append(name)
+
+        if not active_controllers:
+            return None
+        if controller != 'arm' or active_controllers != ['arm']:
+            return ({
+                'ok': False,
+                'status_code': 409,
+                'message': 'Another manual motion is still active',
+            }, None)
+
+        return self._queue_latest_arm_target_locked(payload, summary)
+
+    def _queue_latest_arm_target_locked(
+        self,
+        payload: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> tuple[
+        dict[str, Any],
+        tuple[str, str, Any] | None,
+    ]:
+        controller = 'arm'
+        dispatching = self._manual_dispatching_latest_targets.get(controller)
+        command = self._manual_last_commands.get(controller) or {}
+        pending = self._manual_pending_latest_targets.get(controller)
+
+        if dispatching is not None and not (
+            self._manual_goal_handles.get(controller) is not None
+            or command.get('state') in ACTION_BLOCKING_STATES
+        ):
+            if self._manual_targets_equal(dispatching['summary'], summary):
+                return ({
+                    'ok': True,
+                    'controller': controller,
+                    'queued': True,
+                    'deduplicated': True,
+                    'message': 'Identical latest arm target is already queued',
+                    'pending_latest_target': (
+                        self._manual_pending_diagnostic(dispatching)
                     ),
-                }
-            if self._manual_motion_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': 'Another manual motion is still active',
-                }
-            if self._mission_motion_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': 'Manual control is blocked while a mission is active',
-                }
-            if self._nav_motion_active_locked():
-                return {
-                    'ok': False,
-                    'status_code': 409,
-                    'message': (
-                        'Manual control is blocked while direct navigation '
-                        'is active'
-                    ),
-                }
-            self._manual_last_commands[controller] = {
-                **summary,
-                'command_id': command_id,
-                'state': 'SENDING',
-                'sent_at': self._now_iso(),
-            }
-            self._manual_feedback[controller] = None
+                }, None)
+            entry = self._new_manual_pending_entry(payload, summary)
+            self._manual_dispatching_latest_targets[controller] = entry
             self._append_event_locked(
                 kind='manual',
                 level='info',
-                message=f'Sending {config["label"]} manual goal',
+                event_type='MANUAL_LATEST_TARGET_REPLACED',
+                message='Replaced arm target before automatic dispatch',
+                payload={'request_id': entry['request_id']},
             )
+            return ({
+                'ok': True,
+                'controller': controller,
+                'queued': True,
+                'deduplicated': False,
+                'message': 'Latest arm target replaced before dispatch',
+                'pending_latest_target': self._manual_pending_diagnostic(entry),
+            }, None)
+
+        if (
+            pending is None
+            and self._manual_targets_equal(command, summary)
+        ):
+            return ({
+                'ok': True,
+                'controller': controller,
+                'queued': False,
+                'deduplicated': True,
+                'message': 'Identical arm target is already active',
+                'goal': {
+                    key: deepcopy(command.get(key))
+                    for key in summary
+                },
+            }, None)
+        if pending is not None and self._manual_targets_equal(
+            pending['summary'],
+            summary,
+        ):
+            return ({
+                'ok': True,
+                'controller': controller,
+                'queued': True,
+                'deduplicated': True,
+                'message': 'Identical latest arm target is already queued',
+                'pending_latest_target': self._manual_pending_diagnostic(
+                    pending
+                ),
+            }, None)
+
+        entry = self._new_manual_pending_entry(payload, summary)
+        self._manual_pending_latest_targets[controller] = entry
+        self._append_event_locked(
+            kind='manual',
+            level='info',
+            event_type='MANUAL_LATEST_TARGET_QUEUED',
+            message='Queued latest arm target and requested active goal cancel',
+            payload={'request_id': entry['request_id']},
+        )
+
+        cancel_request = None
+        goal_handle = self._manual_goal_handles.get(controller)
+        command_id = str(command.get('command_id') or '')
+        if (
+            goal_handle is not None
+            and command_id
+            and self._manual_cancel_requested.get(controller) != command_id
+        ):
+            self._manual_cancel_requested[controller] = command_id
+            command['state'] = 'CANCELING'
+            command['cancel_requested_at'] = self._now_iso()
+            cancel_request = (controller, command_id, goal_handle)
+
+        return ({
+            'ok': True,
+            'controller': controller,
+            'queued': True,
+            'deduplicated': False,
+            'message': 'Latest arm target queued; active goal cancellation requested',
+            'pending_latest_target': self._manual_pending_diagnostic(entry),
+        }, cancel_request)
+
+    def _new_manual_pending_entry(
+        self,
+        payload: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            'request_id': str(
+                summary.get('request_id')
+                or f'manual-latest-{time.time_ns()}'
+            ),
+            'payload': deepcopy(payload),
+            'summary': deepcopy(summary),
+            'queued_at': self._now_iso(),
+        }
+
+    def _start_manual_goal(
+        self,
+        controller: str,
+        payload: dict[str, Any],
+        goal_msg: Any,
+        summary: dict[str, Any],
+        *,
+        expected_dispatch_request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        config = self._manual_controllers[controller]
+        client = self._manual_clients[controller]
+        command_id = f'manual-{controller}-{time.time_ns()}'
+        admission = None
+        with self._lock:
+            self._ensure_manual_latest_target_state_locked()
+            if expected_dispatch_request_id is None:
+                admission = self._manual_admission_locked(
+                    controller,
+                    payload,
+                    summary,
+                )
+            else:
+                dispatching = (
+                    self._manual_dispatching_latest_targets.get(controller)
+                )
+                if (
+                    dispatching is None
+                    or dispatching.get('request_id')
+                    != expected_dispatch_request_id
+                ):
+                    return None
+                self._manual_dispatching_latest_targets[controller] = None
+            if admission is not None:
+                pass
+            else:
+                self._manual_last_commands[controller] = {
+                    **summary,
+                    'command_id': command_id,
+                    'state': 'SENDING',
+                    'sent_at': self._now_iso(),
+                }
+                self._manual_feedback[controller] = None
+                self._append_event_locked(
+                    kind='manual',
+                    level='info',
+                    message=f'Sending {config["label"]} manual goal',
+                )
+
+        if admission is not None:
+            response, cancel_request = admission
+            if cancel_request is not None:
+                self._request_manual_replacement_cancel(*cancel_request)
+            return response
 
         try:
             send_future = client.send_goal_async(
@@ -4538,6 +4947,11 @@ class VicPinkyGuiNode(Node):
                 ) == command_id:
                     command['state'] = 'SEND_ERROR'
                     command['result'] = {'error_string': str(exc)}
+                dispatch_entry = self._take_pending_manual_dispatch_locked(
+                    controller
+                )
+            if dispatch_entry is not None:
+                self._dispatch_latest_manual_target(controller, dispatch_entry)
             return {
                 'ok': False,
                 'status_code': 500,
@@ -4583,17 +4997,23 @@ class VicPinkyGuiNode(Node):
                     'command_id'
                 ) == command_id:
                     command['state'] = 'REJECTED'
+                dispatch_entry = self._take_pending_manual_dispatch_locked(
+                    controller
+                )
                 self._append_event_locked(
                     kind='manual',
                     level='error',
                     message=f'{config["label"]} manual goal rejected',
                 )
+            if dispatch_entry is not None:
+                self._dispatch_latest_manual_target(controller, dispatch_entry)
             return {
                 'ok': False,
                 'status_code': 409,
                 'message': f'{config["label"]} manual goal was rejected',
             }
 
+        cancel_request = None
         with self._lock:
             self._manual_goal_handles[controller] = goal_handle
             command = self._manual_last_commands.get(controller)
@@ -4602,6 +5022,21 @@ class VicPinkyGuiNode(Node):
             ) == command_id:
                 command['state'] = 'ACCEPTED'
                 command['accepted_at'] = self._now_iso()
+                if (
+                    controller == 'arm'
+                    and self._manual_pending_latest_targets.get(controller)
+                    is not None
+                    and self._manual_cancel_requested.get(controller)
+                    != command_id
+                ):
+                    self._manual_cancel_requested[controller] = command_id
+                    command['state'] = 'CANCELING'
+                    command['cancel_requested_at'] = self._now_iso()
+                    cancel_request = (
+                        controller,
+                        command_id,
+                        goal_handle,
+                    )
             self._append_event_locked(
                 kind='manual',
                 level='info',
@@ -4630,6 +5065,8 @@ class VicPinkyGuiNode(Node):
                     'goal cancellation requested'
                 ),
             }
+        if cancel_request is not None:
+            self._request_manual_replacement_cancel(*cancel_request)
         result_future.add_done_callback(
             lambda future: self._manual_result_callback(
                 controller,
@@ -4646,11 +5083,209 @@ class VicPinkyGuiNode(Node):
             'goal': summary,
         }
 
+    def _take_pending_manual_dispatch_locked(
+        self,
+        controller: str,
+    ) -> dict[str, Any] | None:
+        self._ensure_manual_latest_target_state_locked()
+        self._manual_cancel_requested[controller] = None
+        entry = self._manual_pending_latest_targets.get(controller)
+        self._manual_pending_latest_targets[controller] = None
+        if entry is not None:
+            self._manual_dispatching_latest_targets[controller] = entry
+        return entry
+
+    def _dispatch_latest_manual_target(
+        self,
+        controller: str,
+        entry: dict[str, Any],
+    ) -> None:
+        """Dispatch the newest queued target after the old goal is terminal."""
+        client = self._manual_clients[controller]
+        config = self._manual_controllers[controller]
+        while True:
+            with self._lock:
+                self._ensure_manual_latest_target_state_locked()
+                current = self._manual_dispatching_latest_targets.get(
+                    controller
+                )
+                if current is None:
+                    return
+                entry = current
+                request_id = str(entry['request_id'])
+                payload = deepcopy(entry['payload'])
+
+            try:
+                goal_msg, summary = self._manual_goal_from_payload(
+                    controller,
+                    payload,
+                )
+                for field_name in (
+                    'request_id',
+                    'web_created_unix_ms',
+                    'gui_received_unix_ms',
+                ):
+                    if field_name in payload:
+                        summary[field_name] = payload[field_name]
+                        if hasattr(goal_msg, field_name):
+                            setattr(goal_msg, field_name, payload[field_name])
+            except (TypeError, ValueError) as exc:
+                superseded = False
+                with self._lock:
+                    current = self._manual_dispatching_latest_targets.get(
+                        controller
+                    )
+                    superseded = (
+                        current is not None
+                        and current.get('request_id') != request_id
+                    )
+                    if not superseded and (
+                        current is not None
+                        and current.get('request_id') == request_id
+                    ):
+                        self._manual_dispatching_latest_targets[controller] = (
+                            None
+                        )
+                    if not superseded:
+                        self._append_event_locked(
+                            kind='manual',
+                            level='error',
+                            event_type='MANUAL_LATEST_TARGET_INVALID',
+                            message=(
+                                'Could not dispatch latest '
+                                f'{controller} target: {exc}'
+                            ),
+                            payload={'request_id': request_id},
+                        )
+                if superseded:
+                    continue
+                return
+
+            if not self._manual_action_ready(controller):
+                client.wait_for_server(timeout_sec=0.25)
+            if not self._manual_action_ready(controller):
+                superseded = False
+                with self._lock:
+                    current = self._manual_dispatching_latest_targets.get(
+                        controller
+                    )
+                    superseded = (
+                        current is not None
+                        and current.get('request_id') != request_id
+                    )
+                    if not superseded and (
+                        current is not None
+                        and current.get('request_id') == request_id
+                    ):
+                        self._manual_dispatching_latest_targets[controller] = (
+                            None
+                        )
+                    if not superseded:
+                        self._append_event_locked(
+                            kind='manual',
+                            level='error',
+                            event_type=(
+                                'MANUAL_LATEST_TARGET_SERVER_UNAVAILABLE'
+                            ),
+                            message=(
+                                'Could not automatically dispatch latest '
+                                'target; action server is not ready: '
+                                f'{config["action_name"]}'
+                            ),
+                            payload={'request_id': request_id},
+                        )
+                if superseded:
+                    continue
+                return
+
+            response = self._start_manual_goal(
+                controller,
+                payload,
+                goal_msg,
+                summary,
+                expected_dispatch_request_id=request_id,
+            )
+            if response is not None:
+                return
+
+    def _request_manual_replacement_cancel(
+        self,
+        controller: str,
+        command_id: str,
+        goal_handle: Any,
+    ) -> None:
+        """Request ROS action cancellation exactly once for one command."""
+        try:
+            cancel_future = goal_handle.cancel_goal_async()
+        except Exception as exc:
+            with self._lock:
+                command = self._manual_last_commands.get(controller)
+                if command is not None and command.get(
+                    'command_id'
+                ) == command_id:
+                    command['cancel_error'] = str(exc)
+                self._append_event_locked(
+                    kind='manual',
+                    level='error',
+                    event_type='MANUAL_REPLACEMENT_CANCEL_ERROR',
+                    message=(
+                        f'Failed to request {controller} replacement cancel: '
+                        f'{exc}'
+                    ),
+                    payload={'command_id': command_id},
+                )
+            return
+
+        cancel_future.add_done_callback(
+            lambda future: self._manual_replacement_cancel_callback(
+                controller,
+                command_id,
+                future,
+            )
+        )
+
+    def _manual_replacement_cancel_callback(
+        self,
+        controller: str,
+        command_id: str,
+        future: Any,
+    ) -> None:
+        try:
+            response = future.result()
+            accepted = bool(getattr(response, 'goals_canceling', []))
+            error = ''
+        except Exception as exc:
+            accepted = False
+            error = str(exc)
+
+        with self._lock:
+            command = self._manual_last_commands.get(controller)
+            if command is None or command.get('command_id') != command_id:
+                return
+            command['cancel_acknowledged'] = accepted
+            command['cancel_ack_at'] = self._now_iso()
+            if error:
+                command['cancel_error'] = error
+            self._append_event_locked(
+                kind='manual',
+                level='info' if accepted else 'error',
+                event_type='MANUAL_REPLACEMENT_CANCEL_ACK',
+                message=(
+                    f'{controller} replacement cancel '
+                    f'{"acknowledged" if accepted else "not acknowledged"}'
+                ),
+                payload={
+                    'command_id': command_id,
+                    'accepted': accepted,
+                    'error': error,
+                },
+            )
+
     def _manual_goal_from_payload(
         self,
         controller: str,
         payload: dict[str, Any],
-    ) -> tuple[FollowJointTrajectory.Goal, dict[str, Any]]:
+    ) -> tuple[Any, dict[str, Any]]:
         config = self._manual_controllers[controller]
         joints = list(config['joints'])
         positions_deg = self._manual_positions_from_payload(
@@ -4670,21 +5305,34 @@ class VicPinkyGuiNode(Node):
                 )
             )
 
-        point = JointTrajectoryPoint()
-        point.positions = [math.radians(value) for value in positions_deg]
-        if target_load_raw is not None:
-            point.effort = [
-                float(target_load_raw)
-                for _ in positions_deg
-            ]
-        self._set_duration(point, duration_s)
-
-        goal_msg = FollowJointTrajectory.Goal()
-        goal_msg.trajectory.joint_names = [
+        joint_names = [
             str(joint['joint_name'])
             for joint in joints
         ]
-        goal_msg.trajectory.points = [point]
+        if controller == 'arm':
+            duration_ms = round(duration_s * 1000.0)
+            if not 1 <= duration_ms <= 0xFFFF:
+                raise ValueError('Arm duration must be 1..65535 ms')
+            goal_msg = ExecuteArmGoal.Goal()
+            goal_msg.joint_names = joint_names
+            goal_msg.positions = [
+                math.radians(value) for value in positions_deg
+            ]
+            goal_msg.duration_ms = int(duration_ms)
+        else:
+            point = JointTrajectoryPoint()
+            point.positions = [
+                math.radians(value) for value in positions_deg
+            ]
+            if target_load_raw is not None:
+                point.effort = [
+                    float(target_load_raw)
+                    for _ in positions_deg
+                ]
+            self._set_duration(point, duration_s)
+            goal_msg = FollowJointTrajectory.Goal()
+            goal_msg.trajectory.joint_names = joint_names
+            goal_msg.trajectory.points = [point]
 
         summary: dict[str, Any] = {
             'controller': controller,
@@ -4693,7 +5341,7 @@ class VicPinkyGuiNode(Node):
                 str(joint['key']): positions_deg[index]
                 for index, joint in enumerate(joints)
             },
-            'joint_names': goal_msg.trajectory.joint_names,
+            'joint_names': joint_names,
             'duration_sec': duration_s,
         }
         if target_load_raw is not None:
@@ -4814,17 +5462,25 @@ class VicPinkyGuiNode(Node):
     ) -> None:
         feedback = feedback_msg.feedback
         with self._lock:
-            self._manual_feedback[controller] = {
-                'actual_deg': [
-                    math.degrees(float(value))
-                    for value in feedback.actual.positions
-                ],
-                'desired_deg': [
-                    math.degrees(float(value))
-                    for value in feedback.desired.positions
-                ],
-                'received_at': self._now_iso(),
-            }
+            if controller == 'arm':
+                self._manual_feedback[controller] = {
+                    'goal_id': int(feedback.goal_id),
+                    'phase': int(feedback.phase),
+                    'detail': str(feedback.detail),
+                    'received_at': self._now_iso(),
+                }
+            else:
+                self._manual_feedback[controller] = {
+                    'actual_deg': [
+                        math.degrees(float(value))
+                        for value in feedback.actual.positions
+                    ],
+                    'desired_deg': [
+                        math.degrees(float(value))
+                        for value in feedback.desired.positions
+                    ],
+                    'received_at': self._now_iso(),
+                }
 
     def _manual_late_send_callback(
         self,
@@ -4843,6 +5499,11 @@ class VicPinkyGuiNode(Node):
                 ) == command_id:
                     command['state'] = 'SEND_ERROR'
                     command['result'] = {'error_string': str(exc)}
+                dispatch_entry = self._take_pending_manual_dispatch_locked(
+                    controller
+                )
+            if dispatch_entry is not None:
+                self._dispatch_latest_manual_target(controller, dispatch_entry)
             return
 
         if goal_handle is None or not goal_handle.accepted:
@@ -4852,6 +5513,11 @@ class VicPinkyGuiNode(Node):
                     'command_id'
                 ) == command_id:
                     command['state'] = 'REJECTED'
+                dispatch_entry = self._take_pending_manual_dispatch_locked(
+                    controller
+                )
+            if dispatch_entry is not None:
+                self._dispatch_latest_manual_target(controller, dispatch_entry)
             return
 
         with self._lock:
@@ -4872,6 +5538,8 @@ class VicPinkyGuiNode(Node):
             self._manual_goal_handles[controller] = goal_handle
             command['state'] = 'CANCELING'
             command['accepted_at'] = self._now_iso()
+            command['cancel_requested_at'] = self._now_iso()
+            self._manual_cancel_requested[controller] = command_id
             self._append_event_locked(
                 kind='manual',
                 level='error',
@@ -4891,15 +5559,11 @@ class VicPinkyGuiNode(Node):
                 ) == command_id:
                     command['result'] = {'error_string': str(exc)}
             result_future = None
-        try:
-            goal_handle.cancel_goal_async()
-        except Exception as exc:
-            with self._lock:
-                command = self._manual_last_commands.get(controller)
-                if command is not None and command.get(
-                    'command_id'
-                ) == command_id:
-                    command['result'] = {'error_string': str(exc)}
+        self._request_manual_replacement_cancel(
+            controller,
+            command_id,
+            goal_handle,
+        )
         if result_future is not None:
             result_future.add_done_callback(
                 lambda future: self._manual_result_callback(
@@ -4935,17 +5599,41 @@ class VicPinkyGuiNode(Node):
                 result_response.status,
                 f'STATUS_{result_response.status}',
             )
-            result_payload = {
-                'ok': (
-                    result.error_code
-                    == FollowJointTrajectory.Result.SUCCESSFUL
-                ),
-                'status': status_name,
-                'error_code': int(result.error_code),
-                'error_string': result.error_string,
-                'received_at': self._now_iso(),
-            }
+            if controller == 'arm':
+                arm_success = bool(getattr(
+                    result,
+                    'success',
+                    getattr(result, 'error_code', 1) == 0,
+                ))
+                result_payload = {
+                    'ok': (
+                        result_response.status
+                        == GoalStatus.STATUS_SUCCEEDED
+                        and arm_success
+                    ),
+                    'status': status_name,
+                    'error_code': None,
+                    'error_string': str(getattr(
+                        result,
+                        'message',
+                        getattr(result, 'error_string', ''),
+                    )),
+                    'goal_id': int(getattr(result, 'goal_id', 0)),
+                    'received_at': self._now_iso(),
+                }
+            else:
+                result_payload = {
+                    'ok': (
+                        result.error_code
+                        == FollowJointTrajectory.Result.SUCCESSFUL
+                    ),
+                    'status': status_name,
+                    'error_code': int(result.error_code),
+                    'error_string': result.error_string,
+                    'received_at': self._now_iso(),
+                }
 
+        dispatch_entry = None
         with self._lock:
             if (
                 expected_handle is not None
@@ -4975,6 +5663,12 @@ class VicPinkyGuiNode(Node):
                     f'{result_payload["error_string"]}'
                 ),
             )
+            dispatch_entry = self._take_pending_manual_dispatch_locked(
+                controller
+            )
+
+        if dispatch_entry is not None:
+            self._dispatch_latest_manual_target(controller, dispatch_entry)
 
     def start_direct_nav(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send one same-floor /nav/go_to RunTask goal."""
@@ -6065,11 +6759,21 @@ class VicPinkyGuiNode(Node):
             if canceling else 'Mission cancel rejected',
         }
 
-    def _wait_for_future(self, future: Any) -> Any:
+    def _wait_for_future(
+        self,
+        future: Any,
+        *,
+        timeout_s: float | None = None,
+    ) -> Any:
         event = threading.Event()
         future.add_done_callback(lambda _: event.set())
 
-        if not event.wait(timeout=self._request_timeout_s):
+        wait_timeout = (
+            self._request_timeout_s
+            if timeout_s is None
+            else max(0.1, float(timeout_s))
+        )
+        if not event.wait(timeout=wait_timeout):
             return None
 
         try:

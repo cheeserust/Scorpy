@@ -1,6 +1,9 @@
 mission:
   name: driving_only_4f_5f_manual_buttons
 
+  # This runs the same base-driving actions and numeric goals as the full
+  # mission, but omits every arm action. The operator handles elevator
+  # call/floor buttons and confirms each manual transition with Enter.
   steps:
     - state: GO_TO_ELEVATOR_FRONT
       task: go_to
@@ -12,10 +15,35 @@ mission:
       target: elevator_panel_4f
       location: elevator_panel_4f
       extra:
-        tag_pose_topic: /tag_pose
-        cmd_vel_topic: /cmd_vel
+        target_distance_m: 1.27
+        target_lateral_m: 0.0
+        aligned_hold_sec: 3.0
 
-    # Manual step: press the 4F elevator call button.
+    - state: CONFIRM_ALIGNED_4F
+      task: operator_confirm
+      target: confirm_aligned_4f
+      location: elevator_panel_4f
+      extra:
+        prompt: "4층 엘리베이터 정렬 완료. 호출 및 주변 안전 확인 후 Enter"
+
+    # The two-second delay starts after the operator confirms alignment.
+    - state: DRIVE_APPROACH_ELEVATOR_4F
+      task: base_drive_straight
+      target: forward
+      location: elevator_door_4f
+      extra:
+        start_delay_sec: 2.0
+        distance_m: 0.27
+        speed_mps: 0.15
+
+    - state: FACE_ELEVATOR_4F
+      task: base_rotate
+      target: left
+      location: elevator_door_4f
+      extra:
+        angle_deg: 80.0
+
+    # Operator: press the 4F call button. The robot waits for the open door.
 
     - state: WAIT_ELEVATOR_OPEN
       task: wait_door_open
@@ -29,26 +57,22 @@ mission:
       target: elevator_board
       location: inside_elevator_4f
       extra:
-        mode: enter_elevator
-        localization_mode: aruco_odom
+        target_distance_cm: 50.0
 
-    # Manual step: press the 5F button.
-
-    - state: WAIT_5F
-      task: check_floor
-      target: floor_5_marker
+    - state: CONFIRM_EXIT_5F
+      task: operator_confirm
+      target: confirm_exit_5f
       location: floor_5_marker
       extra:
-        expected_floor: 5
-        floor_topic: /tag/floor_id
+        prompt: "5층 도착 및 문 열림 확인 후 Enter - 하차 진행"
 
     - state: EXIT_ELEVATOR
       task: exit_elevator
       target: elevator_exit_5f
       location: floor_5_marker
       extra:
-        mode: exit_elevator
-        localization_mode: aruco_odom
+        # Only the landing marker/wall (ID 5): keep 10 cm more clearance.
+        exit_target_distance_cm: 70.0
 
     - state: SWITCH_5F_MAP
       task: map_switch
@@ -59,6 +83,15 @@ mission:
       task: go_to
       target: "$delivery_location"
       location: "$delivery_location"
+      extra:
+        start_delay_sec: 3.0
+
+    - state: CONFIRM_TARGET_PLACE
+      task: operator_confirm
+      target: confirm_target_place
+      location: "$delivery_location"
+      extra:
+        prompt: "180도 회전 완료 및 엘리베이터 방향 확인 후 Enter - 복귀 Nav2 시작"
 
     - state: RETURN_TO_ELEVATOR
       task: go_to
@@ -70,10 +103,34 @@ mission:
       target: elevator_panel_5f
       location: elevator_panel_5f
       extra:
-        tag_pose_topic: /tag_pose
-        cmd_vel_topic: /cmd_vel
+        target_distance_m: 1.27
+        target_lateral_m: 0.0
+        aligned_hold_sec: 3.0
 
-    # Manual step: press the 5F elevator call button.
+    - state: CONFIRM_ALIGNED_5F
+      task: operator_confirm
+      target: confirm_aligned_5f
+      location: elevator_panel_5f
+      extra:
+        prompt: "5층 엘리베이터 정렬 완료. 호출 및 주변 안전 확인 후 Enter"
+
+    - state: DRIVE_APPROACH_ELEVATOR_5F
+      task: base_drive_straight
+      target: forward
+      location: elevator_door_5f
+      extra:
+        start_delay_sec: 2.0
+        distance_m: 0.27
+        speed_mps: 0.15
+
+    - state: FACE_ELEVATOR_5F
+      task: base_rotate
+      target: left
+      location: elevator_door_5f
+      extra:
+        angle_deg: 80.0
+
+    # Operator: press the 5F call button. The robot waits for the open door.
 
     - state: WAIT_ELEVATOR_OPEN_RETURN
       task: wait_door_open
@@ -87,26 +144,22 @@ mission:
       target: elevator_board
       location: inside_elevator_5f
       extra:
-        mode: enter_elevator
-        localization_mode: aruco_odom
+        target_distance_cm: 50.0
 
-    # Manual step: press the 4F button.
-
-    - state: WAIT_4F
-      task: check_floor
-      target: floor_4_marker
+    - state: CONFIRM_EXIT_4F
+      task: operator_confirm
+      target: confirm_exit_4f
       location: floor_4_marker
       extra:
-        expected_floor: 4
-        floor_topic: /tag/floor_id
+        prompt: "4층 도착 및 문 열림 확인 후 Enter - 하차 진행"
 
     - state: EXIT_ELEVATOR_RETURN
       task: exit_elevator
       target: elevator_exit_4f
       location: floor_4_marker
       extra:
-        mode: exit_elevator
-        localization_mode: aruco_odom
+        # Only the landing marker/wall (ID 4): keep 10 cm more clearance.
+        exit_target_distance_cm: 70.0
 
     - state: SWITCH_4F_MAP
       task: map_switch
@@ -115,5 +168,8 @@ mission:
 
     - state: RETURN_HOME
       task: go_to
-      target: home
-      location: home
+      target: "$pickup_location"
+      location: "$pickup_location"
+      extra:
+        # Allow AMCL/TF/global costmap to settle after SWITCH_4F_MAP.
+        start_delay_sec: 3.0

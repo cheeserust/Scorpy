@@ -42,6 +42,8 @@ setup(
             'mission_manager.ready_and_approach_coordinator:main',
             'send_mission = mission_manager.send_mission:main',
             'send_demo_mission = mission_manager.send_demo_mission:main',
+            'operator_confirm_console = '
+            'mission_manager.operator_confirm_console:main',
         ],
     },
 )

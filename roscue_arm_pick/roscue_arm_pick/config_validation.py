@@ -274,34 +274,12 @@ def validate_configuration(
                 f'match bridge home {arm[joint]["home"]:.8f}'
             )
 
-    escape_ticks = int(params.get('arm_post_home_escape_duration_ticks', 0))
-    if not 1 <= escape_ticks <= 0xFF:
-        errors.append('arm_post_home_escape_duration_ticks must be 1..255')
-
-    point_ticks = int(params.get('arm_trajectory_point_duration_ticks', 0))
-    min_point_ticks = int(params.get('arm_trajectory_min_duration_ticks', 0))
-    frame_gap_ms = float(params.get('arm_inter_frame_delay_ms', -1.0))
-    if frame_gap_ms < 0.0:
-        errors.append('arm_inter_frame_delay_ms cannot be negative')
-    if not 1 <= min_point_ticks <= point_ticks <= 0xFF:
-        errors.append(
-            'arm trajectory duration ticks must satisfy '
-            '1 <= minimum <= point <= 255'
-        )
-    elif point_ticks * 5.0 < len(arm) * frame_gap_ms:
-        errors.append(
-            'arm trajectory point duration is shorter than the '
-            'five-frame CAN serialization interval'
-        )
-
-    for joint, bounds in arm.items():
-        if joint not in arm_command_raw:
-            continue
-        home_raw = _position_to_command_raw(bounds['home'], bounds)
-        minimum, maximum = arm_command_raw[joint]
-        escape_raw = min(max(home_raw, minimum), maximum)
-        if not minimum <= escape_raw <= maximum:
-            errors.append(f'post-home escape is invalid for {joint}')
+    for pose_name, pose in fixed_config.get('arm_named_poses', {}).items():
+        duration_ms = round(float(pose.get('duration_sec', 0.0)) * 1000.0)
+        if not 1 <= duration_ms <= 0xFFFF:
+            errors.append(
+                f'arm_pose.{pose_name}.duration must be 1..65535 ms'
+            )
 
     gripper_home = fixed_config.get('gripper_named_poses', {}).get(
         'open',

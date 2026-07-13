@@ -15,6 +15,11 @@ def generate_launch_description():
         'config',
         'arm_can_bridge.yaml',
     ])
+    retry_timeout_file = PathJoinSubstitution([
+        FindPackageShare('arm_can_bridge'),
+        'config',
+        'retry_timeout.yaml',
+    ])
 
     can_interface = LaunchConfiguration('can_interface')
     execution_mode = LaunchConfiguration('execution_mode')
@@ -37,6 +42,7 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 parameter_file,
+                retry_timeout_file,
                 {
                     'can_interface': can_interface,
                     'execution_mode': execution_mode,
@@ -61,14 +67,7 @@ def generate_launch_description():
                     ],
                     'arm_command_min_angle_raw': [-9000],
                     'arm_command_max_angle_raw': [9000],
-                    'queue_capacity': 28,
-                    'board2_queue_capacity': 32,
-                    'arm_speed_raw': 1000,
-                    'arm_trajectory_point_duration_ticks': 10,
-                    'arm_trajectory_min_duration_ticks': 8,
-                    'arm_max_ahead_points': 1,
                     'packed_position_feedback_board_ids': [2],
-                    'axis_status_flags_board_ids': [2],
                 },
             ],
         ),

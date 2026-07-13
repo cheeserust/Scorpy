@@ -327,6 +327,10 @@
           <button data-arm-command="estop" class="danger-command" type="button">ESTOP</button>
         </div>
 
+        <p class="meta-line safety-warning">
+          ESTOP 모터 정지
+        </p>
+
         <div id="boardGrid" class="board-grid"></div>
       </section>
 
@@ -570,7 +574,7 @@
         <div class="dialog-heading">
           <div>
             <h2 id="editPoseDialogTitle">저장 자세 수정하기</h2>
-            <p>저장된 각도는 유지하며, 비어 있는 ID와 이름·대기시간을 수정할 수 있습니다.</p>
+            <p>ID, 이름, 대기시간, 저장된 각도와 그리퍼 부하값을 수정할 수 있습니다.</p>
           </div>
         </div>
         <div class="dialog-fields">
@@ -587,6 +591,7 @@
             <input id="editPoseDwell" name="dwell_sec" type="number" min="0" step="0.1" required>
           </label>
         </div>
+        <div id="editPoseControllers" class="edit-pose-controllers"></div>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" data-dialog-close="editPoseDialog">취소</button>
           <button id="editPoseSubmitButton" class="primary-button" type="submit">수정하기</button>

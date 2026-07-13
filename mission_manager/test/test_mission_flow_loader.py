@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 from mission_manager.mission_flow_loader import MissionFlowLoader
@@ -256,10 +257,13 @@ def test_project_config_matches_driving_team_task_servers():
     assert by_state['PRESS_4F_BUTTON'].marker_id == 51
     assert json.loads(
         by_state['ALIGN_ELEVATOR_TAG'].extra_json
-    )['target_distance_m'] == 1.37
+    )['target_distance_m'] == 1.27
+    assert json.loads(
+        by_state['ALIGN_ELEVATOR_TAG'].extra_json
+    )['aligned_hold_sec'] == 3.0
     assert json.loads(
         by_state['ENTER_ELEVATOR'].extra_json
-    )['target_distance_cm'] == 35.0
+    )['target_distance_cm'] == 50.0
     assert by_state['READY_AND_APPROACH_ELEVATOR_4F'].server == (
         '/mission/ready_and_approach'
     )
@@ -276,3 +280,161 @@ def test_project_config_matches_driving_team_task_servers():
     assert states.index('SWITCH_4F_MAP') > states.index(
         'EXIT_ELEVATOR_RETURN'
     )
+
+
+def test_driving_only_flow_matches_full_mission_base_driving():
+    config_dir = Path(__file__).resolve().parents[1] / 'config'
+    context = MissionContext(
+        mission_id='driving-only-test',
+        pickup_location='402',
+        delivery_location='object_place',
+        target_floor=5,
+        object_label='object_1',
+        arm_task_name='deliver_object_1_from_tray',
+    )
+
+    full_plan = MissionFlowLoader(
+        mission_flow_file=str(config_dir / 'mission_flow.yaml'),
+        locations_file=str(config_dir / 'locations.yaml'),
+        action_servers_file=str(config_dir / 'action_servers.yaml'),
+    ).build_plan(context)
+    driving_plan = MissionFlowLoader(
+        mission_flow_file=str(
+            config_dir / 'mission_flow_driving_only.yaml'
+        ),
+        locations_file=str(config_dir / 'locations.yaml'),
+        action_servers_file=str(config_dir / 'action_servers.yaml'),
+    ).build_plan(context)
+
+    full = {step.state: step for step in full_plan}
+    driving = {step.state: step for step in driving_plan}
+
+    assert all(not step.server.startswith('/arm/') for step in driving_plan)
+    assert driving['RETURN_HOME'].target_name == '402'
+
+    common_states = (
+        'GO_TO_ELEVATOR_FRONT',
+        'ALIGN_ELEVATOR_TAG',
+        'FACE_ELEVATOR_4F',
+        'WAIT_ELEVATOR_OPEN',
+        'ENTER_ELEVATOR',
+        'EXIT_ELEVATOR',
+        'SWITCH_5F_MAP',
+        'GO_TO_TARGET_PLACE',
+        'ROTATE_AT_DELIVERY',
+        'RETURN_TO_ELEVATOR',
+        'ALIGN_ELEVATOR_TAG_RETURN',
+        'FACE_ELEVATOR_5F',
+        'WAIT_ELEVATOR_OPEN_RETURN',
+        'ENTER_ELEVATOR_RETURN',
+        'EXIT_ELEVATOR_RETURN',
+        'SWITCH_4F_MAP',
+        'RETURN_HOME',
+    )
+    for state in common_states:
+        assert driving[state] == full[state]
+
+    assert 'WAIT_5F' not in driving
+    assert 'WAIT_4F' not in driving
+
+    gate_states = (
+        'CONFIRM_ALIGNED_4F',
+        'CONFIRM_EXIT_5F',
+        'CONFIRM_TARGET_PLACE',
+        'CONFIRM_ALIGNED_5F',
+        'CONFIRM_EXIT_4F',
+    )
+    for state in gate_states:
+        assert driving[state].server == '/operator/confirm'
+        assert driving[state].task_id == 'operator_confirm'
+        assert math.isinf(driving[state].timeout_sec)
+        assert json.loads(driving[state].extra_json)['prompt']
+
+    driving_states = [step.state for step in driving_plan]
+    assert driving_states.index('ALIGN_ELEVATOR_TAG') < (
+        driving_states.index('CONFIRM_ALIGNED_4F')
+    ) < driving_states.index('DRIVE_APPROACH_ELEVATOR_4F')
+
+    assert driving_states.index('ENTER_ELEVATOR') < (
+        driving_states.index('CONFIRM_EXIT_5F')
+    ) < driving_states.index('EXIT_ELEVATOR')
+    assert driving_states.index('GO_TO_TARGET_PLACE') < (
+        driving_states.index('CONFIRM_TARGET_PLACE')
+    ) < driving_states.index('RETURN_TO_ELEVATOR')
+
+    assert driving_states.index('ALIGN_ELEVATOR_TAG_RETURN') < (
+        driving_states.index('CONFIRM_ALIGNED_5F')
+    ) < driving_states.index('DRIVE_APPROACH_ELEVATOR_5F')
+    assert driving_states.index('ENTER_ELEVATOR_RETURN') < (
+        driving_states.index('CONFIRM_EXIT_4F')
+    ) < driving_states.index('EXIT_ELEVATOR_RETURN')
+
+    for state in ('ALIGN_ELEVATOR_TAG', 'ALIGN_ELEVATOR_TAG_RETURN'):
+        assert driving[state].server == full[state].server == '/dock/align'
+        assert json.loads(driving[state].extra_json)[
+            'target_distance_m'
+        ] == json.loads(full[state].extra_json)['target_distance_m'] == 1.27
+        assert json.loads(driving[state].extra_json)[
+            'aligned_hold_sec'
+        ] == json.loads(full[state].extra_json)['aligned_hold_sec'] == 3.0
+
+    drive_state_pairs = (
+        (
+            'DRIVE_APPROACH_ELEVATOR_4F',
+            'READY_AND_APPROACH_ELEVATOR_4F',
+        ),
+        (
+            'DRIVE_APPROACH_ELEVATOR_5F',
+            'READY_AND_APPROACH_ELEVATOR_5F',
+        ),
+    )
+    for driving_state, full_state in drive_state_pairs:
+        step = driving[driving_state]
+        driving_extra = json.loads(step.extra_json)
+        full_extra = json.loads(full[full_state].extra_json)
+        assert step.server == '/base/drive_straight'
+        assert driving_extra['start_delay_sec'] == 2.0
+        assert driving_extra['distance_m'] == full_extra['distance_m'] == 0.27
+        assert driving_extra['speed_mps'] == full_extra['speed_mps'] == 0.15
+        assert full_extra['arm_start_to_drive_delay_sec'] == 2.0
+
+    for state in ('FACE_ELEVATOR_4F', 'FACE_ELEVATOR_5F'):
+        assert driving[state].server == full[state].server == '/base/rotate'
+        assert json.loads(driving[state].extra_json)[
+            'angle_deg'
+        ] == json.loads(full[state].extra_json)['angle_deg'] == 80.0
+
+    board_state_pairs = (
+        ('ENTER_ELEVATOR', 'ENTER_ELEVATOR'),
+        ('ENTER_ELEVATOR_RETURN', 'ENTER_ELEVATOR_RETURN'),
+    )
+    for driving_state, full_state in board_state_pairs:
+        assert driving[driving_state].server == '/elevator/board'
+        assert json.loads(driving[driving_state].extra_json)[
+            'target_distance_cm'
+        ] == json.loads(full[full_state].extra_json)[
+            'target_distance_cm'
+        ] == 50.0
+
+    assert driving['ROTATE_AT_DELIVERY'].server == '/base/rotate'
+    assert json.loads(driving['GO_TO_TARGET_PLACE'].extra_json)[
+        'start_delay_sec'
+    ] == json.loads(full['GO_TO_TARGET_PLACE'].extra_json)[
+        'start_delay_sec'
+    ] == 3.0
+    assert json.loads(driving['RETURN_HOME'].extra_json)[
+        'start_delay_sec'
+    ] == json.loads(full['RETURN_HOME'].extra_json)[
+        'start_delay_sec'
+    ] == 3.0
+    for state in ('EXIT_ELEVATOR', 'EXIT_ELEVATOR_RETURN'):
+        assert json.loads(driving[state].extra_json)[
+            'exit_target_distance_cm'
+        ] == json.loads(full[state].extra_json)[
+            'exit_target_distance_cm'
+        ] == 70.0
+    assert json.loads(driving['ROTATE_AT_DELIVERY'].extra_json)[
+        'angle_deg'
+    ] == json.loads(full['ROTATE_AT_DELIVERY'].extra_json)[
+        'angle_deg'
+    ] == 180.0

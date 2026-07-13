@@ -866,6 +866,31 @@ label {
   color: var(--muted);
 }
 
+.edit-pose-controllers {
+  display: grid;
+  gap: 12px;
+}
+
+.edit-pose-controller {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.edit-pose-controller legend {
+  padding: 0 6px;
+  font-weight: 800;
+}
+
+.edit-pose-controller label {
+  display: grid;
+  gap: 5px;
+}
+
 .dialog-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(100px, 1fr));

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 
-from control_msgs.action import FollowJointTrajectory
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from trajectory_msgs.msg import JointTrajectoryPoint
+from vicpinky_interfaces.action import ExecuteArmGoal
 
 
 class FixedJointTest(Node):
@@ -14,8 +13,8 @@ class FixedJointTest(Node):
 
         self.arm_client = ActionClient(
             self,
-            FollowJointTrajectory,
-            '/arm_controller/follow_joint_trajectory'
+            ExecuteArmGoal,
+            '/arm_controller/execute_joint_goal'
         )
 
         self.joint_names = [
@@ -27,21 +26,17 @@ class FixedJointTest(Node):
         ]
 
     def send_arm_goal(self, positions, duration_sec=3.0):
-        self.get_logger().info('Waiting for /arm_controller/follow_joint_trajectory...')
+        self.get_logger().info('Waiting for direct arm V3 action...')
 
         if not self.arm_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('Arm action server not available.')
             return False
 
-        goal_msg = FollowJointTrajectory.Goal()
-        goal_msg.trajectory.joint_names = self.joint_names
-
-        point = JointTrajectoryPoint()
-        point.positions = positions
-        point.time_from_start.sec = int(duration_sec)
-        point.time_from_start.nanosec = int((duration_sec - int(duration_sec)) * 1e9)
-
-        goal_msg.trajectory.points.append(point)
+        duration_ms = round(float(duration_sec) * 1000.0)
+        goal_msg = ExecuteArmGoal.Goal()
+        goal_msg.joint_names = self.joint_names
+        goal_msg.positions = positions
+        goal_msg.duration_ms = duration_ms
 
         self.get_logger().info(f'Joint names: {self.joint_names}')
         self.get_logger().info(f'Positions: {positions}')
@@ -65,8 +60,8 @@ class FixedJointTest(Node):
         rclpy.spin_until_future_complete(self, result_future)
 
         result = result_future.result().result
-        self.get_logger().info(f'Result error_code: {result.error_code}')
-        self.get_logger().info(f'Result error_string: {result.error_string}')
+        self.get_logger().info(f'Result success: {result.success}')
+        self.get_logger().info(f'Result message: {result.message}')
 
         return True
 

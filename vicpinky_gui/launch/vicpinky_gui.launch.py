@@ -2,9 +2,10 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -16,6 +17,7 @@ def generate_launch_description():
     manual_arm_mode = LaunchConfiguration('manual_arm_mode')
     enable_manual_arm = LaunchConfiguration('enable_manual_arm')
     enable_manual_gripper = LaunchConfiguration('enable_manual_gripper')
+    mission_flow_file = LaunchConfiguration('mission_flow_file')
     map_topic = LaunchConfiguration('map_topic')
     amcl_pose_topic = LaunchConfiguration('amcl_pose_topic')
     odom_topic = LaunchConfiguration('odom_topic')
@@ -57,6 +59,15 @@ def generate_launch_description():
             'enable_manual_gripper',
             default_value='true',
             description='Show and enable manual gripper controls.',
+        ),
+        DeclareLaunchArgument(
+            'mission_flow_file',
+            default_value=PathJoinSubstitution([
+                FindPackageShare('mission_manager'),
+                'config',
+                'mission_flow.yaml',
+            ]),
+            description='Mission flow YAML displayed by the dashboard.',
         ),
         DeclareLaunchArgument(
             'map_topic',
@@ -105,6 +116,7 @@ def generate_launch_description():
                     enable_manual_gripper,
                     value_type=bool,
                 ),
+                'mission_flow_file': mission_flow_file,
                 'map_topic': map_topic,
                 'amcl_pose_topic': amcl_pose_topic,
                 'odom_topic': odom_topic,

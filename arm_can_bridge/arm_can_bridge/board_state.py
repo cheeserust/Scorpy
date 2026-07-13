@@ -8,7 +8,6 @@ import time
 from typing import Mapping, Optional
 
 from .can_protocol import (
-    ALL_MOTORS,
     BOARD2_REQUIRED_HOMING_MASK,
     BOARD3_SERVO_COUNT,
     BOARD_ID_BOARD1,
@@ -61,7 +60,7 @@ def default_board_config(board_id: int) -> BoardRuntimeConfig:
     if normalized == BOARD_ID_BOARD1:
         return BoardRuntimeConfig(
             board_id=normalized,
-            queue_capacity=QUEUE_CAPACITY,
+            queue_capacity=1,
             required_homing_mask=REQUIRED_HOMING_MASK,
             requires_homing=True,
             requires_ready=False,
@@ -274,7 +273,7 @@ class BoardStateTracker:
             )
 
     def available_queue_slots(self) -> int:
-        """Return conservative locally available command slots."""
+        """Return Board1 slot state or Board2/3 legacy queue credit."""
         with self._lock:
             return self._local_queue_free
 
@@ -302,6 +301,11 @@ class BoardStateTracker:
                 and status.enabled
                 and self._readiness_ok(status)
                 and self._commanded_position_valid
+                and (
+                    status.goal_slot_free == self._queue_capacity
+                    if self._board_id in (BOARD_ID_BOARD1, BOARD_ID_BOARD2)
+                    else True
+                )
             )
 
     def can_stream_slots(
@@ -417,7 +421,11 @@ class BoardStateTracker:
                 and (
                     status.board3_staging_count == 0
                     if self._board_id == BOARD_ID_BOARD3
-                    else status.moving_motor_id == ALL_MOTORS
+                    else (
+                        status.moving_mask == 0
+                        and status.target_reached_mask
+                        == self._required_homing_mask
+                    )
                 )
                 and status.queue_free == self._queue_capacity
                 and status.enabled
@@ -462,7 +470,7 @@ class BoardStateTracker:
     def _readiness_ok(self, status: BoardStatus) -> bool:
         if self._requires_homing:
             return (
-                status.homing_done_bits & self._required_homing_mask
+                status.position_valid_mask & self._required_homing_mask
             ) == self._required_homing_mask
 
         if self._requires_ready:
