@@ -2,85 +2,61 @@
 #include "../Inc/stepper.h"
 
 typedef struct {
-    uint8_t active;
-    uint8_t expected_motor_id;
-    uint8_t duration_5ms;
-    uint32_t start_ms;
-    TrajectoryPoint point;
-} PendingTrajectoryPoint;
-
-typedef struct {
-    TrajectoryPoint points[TRAJECTORY_POINT_QUEUE_SIZE];
-    volatile uint8_t head;
-    volatile uint8_t tail;
-} TrajectoryPointRingQueue;
+    uint8_t valid;
+    uint8_t ready;
+    uint8_t started;
+    uint8_t goal_id;
+    uint8_t received_axis_mask;
+    uint16_t duration_ms;
+    uint32_t staging_start_ms;
+    uint32_t motion_start_ms;
+    uint8_t has_motion;
+    int32_t target_step[AXIS_COUNT];
+} GoalSlot;
 
 #if BOARD_ID == BOARD_ID_BOARD1
-static const int32_t gear_ratio[AXIS_COUNT] = { 20, 50, 30, 20 };
-static const int32_t motor_steps_per_rev[AXIS_COUNT] = { 200, 200, 200, 200 };
-static const int32_t min_angle[AXIS_COUNT] = { -8500, -7810, -9150, -9000 };
-static const int32_t max_angle[AXIS_COUNT] = { 9000, 8000, 9000, 18000 };
-static const int32_t home_angle[AXIS_COUNT] = { -8650, -7810, -9150, -9000 };
-#elif BOARD_ID == BOARD_ID_BOARD2
-static const int32_t gear_ratio[AXIS_COUNT] = { 20 };
-static const int32_t motor_steps_per_rev[AXIS_COUNT] = { 200 };
-static const int32_t min_angle[AXIS_COUNT] = { -9000 };
-static const int32_t max_angle[AXIS_COUNT] = { 18000 };
-static const int32_t home_angle[AXIS_COUNT] = { -9000 };
+static const int32_t gear_ratio[AXIS_COUNT] = {20, 50, 30, 20};
+static const int32_t motor_steps_per_rev[AXIS_COUNT] = {200, 200, 200, 200};
+/* Axis0 home is intentionally valid at -86.50 degrees. */
+static const int32_t min_angle[AXIS_COUNT] = {-8650, -7810, -9150, -9000};
+static const int32_t max_angle[AXIS_COUNT] = {9000, 8000, 9000, 18000};
+static const int32_t home_angle[AXIS_COUNT] = {-8650, -7810, -9150, -9000};
+#else
+static const int32_t gear_ratio[AXIS_COUNT] = {20};
+static const int32_t motor_steps_per_rev[AXIS_COUNT] = {200};
+static const int32_t min_angle[AXIS_COUNT] = {-9000};
+static const int32_t max_angle[AXIS_COUNT] = {18000};
+static const int32_t home_angle[AXIS_COUNT] = {-9000};
 #endif
 
-static PendingTrajectoryPoint g_pending_trajectory_point; // 다 모이면 queue에 push, 축별 명령을 하나의 TrajectoryPoint로 조립
-static TrajectoryPointRingQueue g_trajectory_point_ring_queue; //실행 대기 원형 큐,  완성된 TrajectoryPoint들을 실행 순서대로 저장
-static TrajectoryPoint g_current_trajectory_point; // 현재 실행 중인 명령, 지금 실행 중인 TrajectoryPoint를 보관
-static volatile uint8_t g_queue_overflow_clear_request;
-static volatile uint8_t g_queue_overflow_clear_ack;
+static GoalSlot g_goal;
 static volatile int32_t g_planned_step[AXIS_COUNT];
+static uint8_t g_cancelled_goal_valid;
+static uint8_t g_cancelled_goal_id;
+static uint8_t g_completed_goal_valid;
+static uint8_t g_completed_goal_id;
+static uint8_t g_timeout_event_pending;
+static uint8_t g_timeout_goal_id;
+static uint8_t g_timeout_mask;
+static uint16_t g_timeout_duration_ms;
 
-static uint8_t trajectory_point_queue_push(const TrajectoryPoint *point)
+static void clear_goal_slot(void)
 {
-    uint8_t tail = g_trajectory_point_ring_queue.tail;
-    uint8_t next_tail = (uint8_t)((tail + 1) % TRAJECTORY_POINT_QUEUE_SIZE);
-
-    if (next_tail == g_trajectory_point_ring_queue.head) return 0;
-
-    g_trajectory_point_ring_queue.points[tail] = *point;
-    g_trajectory_point_ring_queue.tail = next_tail;
-    return 1;
+    g_goal.valid = 0;
+    g_goal.ready = 0;
+    g_goal.started = 0;
+    g_goal.goal_id = 0;
+    g_goal.received_axis_mask = 0;
+    g_goal.duration_ms = 0;
+    g_goal.staging_start_ms = 0;
+    g_goal.motion_start_ms = 0;
+    g_goal.has_motion = 0;
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) g_goal.target_step[i] = 0;
 }
 
-static uint8_t trajectory_point_queue_pop(TrajectoryPoint *point)
-{
-    uint8_t head = g_trajectory_point_ring_queue.head;
-
-    if (head == g_trajectory_point_ring_queue.tail) return 0;
-
-    *point = g_trajectory_point_ring_queue.points[head];
-    g_trajectory_point_ring_queue.head = (uint8_t)((head + 1) % TRAJECTORY_POINT_QUEUE_SIZE);
-    return 1;
-}
-
-static void clear_trajectory_point(TrajectoryPoint *point)
-{
-    point->duration_ms = 0;
-    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        point->target_step[i] = 0;
-        point->speed[i] = 0;
-    }
-}
-
-static void reset_pending_trajectory_point(void)
-{
-    g_pending_trajectory_point.active = 0;
-    g_pending_trajectory_point.expected_motor_id = 0;
-    g_pending_trajectory_point.duration_5ms = 0;
-    g_pending_trajectory_point.start_ms = 0;
-    clear_trajectory_point(&g_pending_trajectory_point.point);
-}
-
-// 외부에서 사용할 함수
 void trajectory_cancel_staging(void)
 {
-    reset_pending_trajectory_point();
+    if (!g_goal.started) clear_goal_slot();
 }
 
 void trajectory_stop_motion(void)
@@ -95,272 +71,218 @@ void trajectory_stop_motion(void)
 
 void trajectory_sync_planned_to_current(void)
 {
-    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        g_planned_step[i] = g_current_step[i];
-    }
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) g_planned_step[i] = g_current_step[i];
 }
 
 int32_t trajectory_get_planned_step(uint8_t axis_id)
 {
-    if (axis_id >= AXIS_COUNT) return 0;
-    return g_planned_step[axis_id];
+    return axis_id < AXIS_COUNT ? g_planned_step[axis_id] : 0;
 }
 
 void trajectory_clear(void)
 {
-    g_trajectory_point_ring_queue.head = 0;
-    g_trajectory_point_ring_queue.tail = 0;
-    reset_pending_trajectory_point();
+    clear_goal_slot();
     trajectory_stop_motion();
     trajectory_sync_planned_to_current();
+    g_timeout_event_pending = 0;
 }
 
-void trajectory_request_queue_overflow_clear(void)
+uint8_t trajectory_goal_slot_free(void)
 {
-    g_queue_overflow_clear_ack = 0;
-    g_queue_overflow_clear_request = 1;
+    return (!g_goal.valid && !g_motion_active) ? 1u : 0u;
 }
 
-void trajectory_cancel_queue_overflow_clear(void)
+uint16_t trajectory_goal_duration_ms(void)
 {
-    g_queue_overflow_clear_request = 0;
-    g_queue_overflow_clear_ack = 0;
+    return g_goal.valid ? g_goal.duration_ms : 0;
 }
 
-uint8_t trajectory_take_queue_overflow_clear_ack(void)
+uint8_t trajectory_goal_mask(void)
 {
-    if (!g_queue_overflow_clear_ack) return 0;
-    g_queue_overflow_clear_ack = 0;
-    return 1;
-}
-
-static void trajectory_service_queue_overflow_clear_request(void)
-{
-    if (!g_queue_overflow_clear_request || !g_queue_overflow) return;
-    if (g_motion_active || g_pending_trajectory_point.active) return;
-    if (g_trajectory_point_ring_queue.head != g_trajectory_point_ring_queue.tail) return;
-
-    g_queue_overflow = 0;
-    g_queue_overflow_clear_request = 0;
-    g_queue_overflow_clear_ack = 1;
-}
-
-uint8_t get_free_axis_command_count(void)
-{
-    uint8_t head = g_trajectory_point_ring_queue.head;
-    uint8_t tail = g_trajectory_point_ring_queue.tail;
-    uint8_t used_points;
-    uint8_t free_points;
-
-    if (tail >= head) used_points = (uint8_t)(tail - head);
-    else used_points = (uint8_t)(TRAJECTORY_POINT_QUEUE_SIZE - head + tail);
-
-    free_points = (uint8_t)((TRAJECTORY_POINT_QUEUE_SIZE - 1) - used_points);
-    return (uint8_t)(free_points * BOARD_STAGING_FRAME_COUNT);
+    return g_goal.valid ? g_goal.received_axis_mask : 0;
 }
 
 int32_t angle_to_step(uint8_t axis_id, int32_t angle_raw)
 {
-    int64_t step_value;
-
+    int64_t value;
     if (axis_id >= AXIS_COUNT) return 0;
-    step_value = (int64_t)angle_raw *
-                 gear_ratio[axis_id] *
-                 motor_steps_per_rev[axis_id] *
-                 MICROSTEP;
-    return (int32_t)(step_value / 36000);
+    value = (int64_t)angle_raw * gear_ratio[axis_id] *
+            motor_steps_per_rev[axis_id] * MICROSTEP;
+    return (int32_t)(value / 36000);
 }
 
 int32_t step_to_angle(uint8_t axis_id, int32_t step)
 {
-    int64_t angle_value;
-    int64_t steps_per_output_rev;
-
+    int64_t value;
+    int64_t steps_per_rev;
     if (axis_id >= AXIS_COUNT) return 0;
-
-    angle_value = (int64_t)step * 36000;
-    steps_per_output_rev = (int64_t)gear_ratio[axis_id] *
-                           motor_steps_per_rev[axis_id] *
-                           MICROSTEP;
-
-    if (angle_value >= 0) angle_value += steps_per_output_rev / 2;
-    else angle_value -= steps_per_output_rev / 2;
-
-    return (int32_t)(angle_value / steps_per_output_rev);
+    value = (int64_t)step * 36000;
+    steps_per_rev = (int64_t)gear_ratio[axis_id] *
+                    motor_steps_per_rev[axis_id] * MICROSTEP;
+    value += value >= 0 ? steps_per_rev / 2 : -(steps_per_rev / 2);
+    return (int32_t)(value / steps_per_rev);
 }
 
 int32_t get_home_angle(uint8_t axis_id)
 {
-    if (axis_id >= AXIS_COUNT) return 0;
-    return home_angle[axis_id];
+    return axis_id < AXIS_COUNT ? home_angle[axis_id] : 0;
 }
 
-uint8_t trajectory_resolve_target_step(uint8_t axis_id,
-                                       int32_t target_raw,
-                                       uint8_t relative,
-                                       uint8_t step_mode,
+uint8_t trajectory_resolve_target_step(uint8_t axis_id, int32_t target_raw,
+                                       uint8_t relative, uint8_t step_mode,
                                        int32_t *target_step)
 {
     int64_t resolved;
-    int32_t min_step;
-    int32_t max_step;
-
+    int32_t minimum;
+    int32_t maximum;
     if (axis_id >= AXIS_COUNT || target_step == 0) return 0;
 
     resolved = step_mode ? target_raw : angle_to_step(axis_id, target_raw);
     if (relative) resolved += g_planned_step[axis_id];
     if (resolved < INT32_MIN || resolved > INT32_MAX) return 0;
-
     *target_step = (int32_t)resolved;
 
-    min_step = angle_to_step(axis_id, min_angle[axis_id]);
-    max_step = angle_to_step(axis_id, max_angle[axis_id]);
-    if (min_step > max_step) {
-        int32_t tmp = min_step;
-        min_step = max_step;
-        max_step = tmp;
+    minimum = angle_to_step(axis_id, min_angle[axis_id]);
+    maximum = angle_to_step(axis_id, max_angle[axis_id]);
+    if (minimum > maximum) {
+        int32_t swap = minimum;
+        minimum = maximum;
+        maximum = swap;
+    }
+    return (*target_step >= minimum && *target_step <= maximum) ? 1u : 0u;
+}
+
+uint8_t trajectory_stage_goal_axis(uint8_t motor_id, int32_t target_step,
+                                   uint8_t goal_id, uint16_t duration_ms,
+                                   uint8_t *received_axis_mask)
+{
+    uint8_t motor_bit;
+    if (received_axis_mask != 0) *received_axis_mask = 0;
+    if (motor_id >= AXIS_COUNT || duration_ms == 0) return GOAL_STAGE_INVALID;
+    if (g_motion_active || g_goal.started) return GOAL_STAGE_BUSY;
+
+    if (!g_goal.valid) {
+        if (g_cancelled_goal_valid && goal_id == g_cancelled_goal_id) {
+            return GOAL_STAGE_INVALID;
+        }
+        if (g_completed_goal_valid && goal_id == g_completed_goal_id) {
+            if (received_axis_mask != 0) {
+                *received_axis_mask = (uint8_t)((1u << AXIS_COUNT) - 1u);
+            }
+            return GOAL_STAGE_DUPLICATE;
+        }
+        clear_goal_slot();
+        g_goal.valid = 1;
+        g_goal.goal_id = goal_id;
+        g_goal.duration_ms = duration_ms;
+        g_goal.staging_start_ms = global_tick_ms;
+    } else if (g_goal.goal_id != goal_id) {
+        return GOAL_STAGE_BUSY;
+    } else if (g_goal.duration_ms != duration_ms) {
+        clear_goal_slot();
+        return GOAL_STAGE_INVALID;
     }
 
-    if (*target_step < min_step) return 0;
-    if (*target_step > max_step) return 0;
+    motor_bit = (uint8_t)(1u << motor_id);
+    if (g_goal.received_axis_mask & motor_bit) {
+        if (received_axis_mask != 0) *received_axis_mask = g_goal.received_axis_mask;
+        if (g_goal.target_step[motor_id] == target_step) return GOAL_STAGE_DUPLICATE;
+        clear_goal_slot();
+        return GOAL_STAGE_INVALID;
+    }
+
+    g_goal.target_step[motor_id] = target_step;
+    g_goal.received_axis_mask |= motor_bit;
+    if (received_axis_mask != 0) *received_axis_mask = g_goal.received_axis_mask;
+
+    if (g_goal.received_axis_mask != (uint8_t)((1u << AXIS_COUNT) - 1u)) {
+        return GOAL_STAGE_WAITING;
+    }
+
+    g_goal.ready = 1;
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) g_planned_step[i] = g_goal.target_step[i];
+    return GOAL_STAGE_READY;
+}
+
+uint8_t trajectory_start_goal(uint8_t goal_id)
+{
+    if (!g_goal.valid || !g_goal.ready || g_goal.started || g_goal.goal_id != goal_id) return 0;
+
+    g_goal.has_motion = 0;
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+        g_motion_start_step[i] = g_current_step[i];
+        g_target_step[i] = g_goal.target_step[i];
+        if (g_target_step[i] != g_current_step[i]) g_goal.has_motion = 1;
+    }
+    g_goal.started = 1;
+    g_goal.motion_start_ms = global_tick_ms;
+    stepper_prepare_motion(g_goal.duration_ms);
+    g_motion_active = 1;
+    g_state = STATE_MOVING;
+    return 1;
+}
+
+uint8_t trajectory_cancel_goal(uint8_t goal_id)
+{
+    if (g_goal.valid && g_goal.goal_id != goal_id) return 0;
+    trajectory_stop_motion();
+    clear_goal_slot();
+    trajectory_sync_planned_to_current();
+    g_cancelled_goal_valid = 1;
+    g_cancelled_goal_id = goal_id;
+    if (g_enabled && !ESTOP_ACTIVE() && g_error_code == ERR_NONE) g_state = STATE_IDLE;
     return 1;
 }
 
 uint8_t trajectory_handle_staging_timeout(void)
 {
-    if (!g_pending_trajectory_point.active) return 0;
-    if ((global_tick_ms - g_pending_trajectory_point.start_ms) <= STAGING_TIMEOUT_MS) return 0;
+    if (!g_goal.valid || g_goal.ready || g_goal.started) return 0;
+    if ((global_tick_ms - g_goal.staging_start_ms) <= STAGING_TIMEOUT_MS) return 0;
 
-    trajectory_clear();
-    g_error_code = ERR_INVALID_CMD;
-    g_state = STATE_ERROR;
+    g_timeout_event_pending = 1;
+    g_timeout_goal_id = g_goal.goal_id;
+    g_timeout_mask = g_goal.received_axis_mask;
+    g_timeout_duration_ms = g_goal.duration_ms;
+    clear_goal_slot();
     return 1;
 }
 
-static uint16_t duration_5ms_to_ms(uint8_t duration_5ms)
+uint8_t trajectory_take_timeout_event(uint8_t *goal_id, uint8_t *mask,
+                                      uint16_t *duration_ms)
 {
-    uint16_t duration_ms = (uint16_t)duration_5ms * 5;
-    return duration_ms == 0 ? 1 : duration_ms;
+    if (!g_timeout_event_pending) return 0;
+    if (goal_id != 0) *goal_id = g_timeout_goal_id;
+    if (mask != 0) *mask = g_timeout_mask;
+    if (duration_ms != 0) *duration_ms = g_timeout_duration_ms;
+    g_timeout_event_pending = 0;
+    return 1;
 }
-
-uint8_t trajectory_add_axis_command(uint8_t motor_id, int32_t target_step, uint16_t speed, uint8_t duration_5ms)
-{
-    if (trajectory_handle_staging_timeout()) return TRAJECTORY_STAGING_INVALID;
-    if (motor_id >= AXIS_COUNT) {
-        reset_pending_trajectory_point();
-        return TRAJECTORY_STAGING_INVALID;
-    }
-
-    if (!g_pending_trajectory_point.active) {
-        if (motor_id != 0) return TRAJECTORY_STAGING_INVALID;
-
-        reset_pending_trajectory_point();
-        g_pending_trajectory_point.active = 1;
-        g_pending_trajectory_point.expected_motor_id = 0;
-        g_pending_trajectory_point.duration_5ms = duration_5ms;
-        g_pending_trajectory_point.start_ms = global_tick_ms;
-        g_pending_trajectory_point.point.duration_ms = duration_5ms_to_ms(duration_5ms);
-    } else {
-        if (motor_id != g_pending_trajectory_point.expected_motor_id) {
-            reset_pending_trajectory_point();
-            return TRAJECTORY_STAGING_INVALID;
-        }
-        if (duration_5ms != g_pending_trajectory_point.duration_5ms) {
-            reset_pending_trajectory_point();
-            return TRAJECTORY_STAGING_INVALID;
-        }
-    }
-
-    g_pending_trajectory_point.point.target_step[motor_id] = target_step;
-    g_pending_trajectory_point.point.speed[motor_id] = speed;
-    g_pending_trajectory_point.expected_motor_id++;
-
-    if (g_pending_trajectory_point.expected_motor_id < BOARD_STAGING_FRAME_COUNT) return TRAJECTORY_STAGING_WAITING;
-
-    if (!trajectory_point_queue_push(&g_pending_trajectory_point.point)) {
-        reset_pending_trajectory_point();
-        return TRAJECTORY_STAGING_QUEUE_FULL;
-    }
-
-    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        g_planned_step[i] = g_pending_trajectory_point.point.target_step[i];
-    }
-
-    reset_pending_trajectory_point();
-    return TRAJECTORY_STAGING_COMMITTED;
-}
-
-// ========================
-// 1ms 인터럽트
-// ==========================
 
 void trajectory_1ms_interrupt(void)
 {
-    TrajectoryPoint point;
-    uint8_t reached;
-
-    // Queue consumer인 TIM3만 상태를 판정하고 clear
-    trajectory_service_queue_overflow_clear_request();
-
-    // 1. 모션 허용 상태 체크
-    if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE ||  g_homing_active || !system_all_homed()) {
-        if (g_motion_active) {
-            trajectory_stop_motion();
-        }
+    uint8_t reached = 1;
+    if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE ||
+        g_homing_active || !system_all_homed()) {
+        if (g_motion_active) trajectory_stop_motion();
         return;
     }
+    if (!g_motion_active || !g_goal.started) return;
 
-    // 2. 모션이 비활성화 상태라면 즉시 큐에서 다음 명령 인출
-    if (!g_motion_active) {
-        if (trajectory_point_queue_pop(&point)) {
-            g_current_trajectory_point = point;
-
-            for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-                g_motion_start_step[i] = g_current_step[i];
-                g_target_step[i] = point.target_step[i];
-            }
-
-            stepper_prepare_motion(point.duration_ms == 0 ? 1 : point.duration_ms);
-            g_motion_active = 1;
-            g_state = STATE_MOVING;
-        } else if (g_state == STATE_MOVING) {
-            g_state = STATE_IDLE;
-        }
-    }
-
-    // 큐에서 새 모션을 시작하지 못했다면(큐 비었음) 즉시 탈출
-    if (!g_motion_active) return;
-
-
-    // 3. 목표 도달 여부 체크 (새 모션 시작 직후 바로 체크 가능하도록 순서 유지)
-    reached = 1;
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        if (g_current_step[i] != g_current_trajectory_point.target_step[i]) {
+        if (g_current_step[i] != g_goal.target_step[i]) {
             reached = 0;
-            break; // 한 축이라도 덜 갔으면 즉시 탈출
+            break;
         }
     }
+    if (!reached) return;
+    if (!g_goal.has_motion &&
+        (global_tick_ms - g_goal.motion_start_ms) < g_goal.duration_ms) return;
 
-    // 4. 도달 완료 처리
-    if (reached) {
-        for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-            g_target_step[i] = g_current_trajectory_point.target_step[i];
-        }
-        g_motion_active = 0;
-        stepper_cancel_motion();
-        if (!trajectory_point_queue_pop(&point)) {
-            g_state = STATE_IDLE;
-        } else {
-            g_current_trajectory_point = point;
-
-            for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-                g_motion_start_step[i] = g_current_step[i];
-                g_target_step[i] = point.target_step[i];
-            }
-
-            stepper_prepare_motion(point.duration_ms == 0 ? 1 : point.duration_ms);
-            g_motion_active = 1;
-            g_state = STATE_MOVING;
-        }
-    }
+    g_completed_goal_valid = 1;
+    g_completed_goal_id = g_goal.goal_id;
+    g_motion_active = 0;
+    stepper_cancel_motion();
+    clear_goal_slot();
+    trajectory_sync_planned_to_current();
+    g_state = STATE_IDLE;
 }

@@ -8,3 +8,5 @@ void board_can_queue_position_feedback_all(void);
 void board_can_service_tx(void);
 void board_can_request_status_event(void);
 void board_can_flush_status_event(void);
+void board_can_drain_goal_events(void);
+void board_can_cancel_goal_acks(void);

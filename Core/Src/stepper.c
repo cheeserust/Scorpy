@@ -8,15 +8,25 @@
 static uint16_t limit_switch_debounce_count[AXIS_COUNT];
 static uint16_t homing_tick[AXIS_COUNT];
 static uint16_t step_wait_10us[AXIS_COUNT];
-static uint32_t axis_dda_accumulator[AXIS_COUNT];
-static uint32_t total_move_ticks;
+static uint64_t axis_phase_q16[AXIS_COUNT];
+static uint32_t axis_nominal_rate_q16[AXIS_COUNT];
+static uint32_t motion_feed_q16;
+static uint32_t motion_feed_step_q16;
+static int8_t axis_last_dir[AXIS_COUNT];
+static uint8_t axis_dir_setup_wait[AXIS_COUNT];
 
 static volatile uint8_t step_high_flag[AXIS_COUNT];
 static volatile uint8_t g_limit_switch_bitmask = 0;
 /* TIM3가 요청하고 더 높은 우선순위의 TIM2가 소비한다.
  * 축별 byte 대입을 사용해 bitmask read-modify-write 선점 경쟁을 피한다. */
 static volatile uint8_t g_homing_step_request[AXIS_COUNT];
-static uint32_t g_axis_total_steps[AXIS_COUNT];
+#if BOARD_ID == BOARD_ID_BOARD1
+static const uint32_t max_step_rate_sps[AXIS_COUNT] = {1000, 1000, 1000, 1000};
+static const uint32_t acceleration_sps2[AXIS_COUNT] = {500, 500, 500, 500};
+#else
+static const uint32_t max_step_rate_sps[AXIS_COUNT] = {1000};
+static const uint32_t acceleration_sps2[AXIS_COUNT] = {500};
+#endif
 
 
 #if BOARD_ID == BOARD_ID_BOARD1
@@ -180,36 +190,60 @@ void stepper_prepare_motion(uint16_t duration_ms)
     if (limited_duration_ms == 0) limited_duration_ms = 1;
 
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        axis_dda_accumulator[i] = 0;
-        step_wait_10us[i] = 0;
+        uint32_t total_steps;
 
         if (g_target_step[i] >= g_motion_start_step[i]) {
-            g_axis_total_steps[i] = (uint32_t)(g_target_step[i] - g_motion_start_step[i]);
+            total_steps = (uint32_t)(g_target_step[i] - g_motion_start_step[i]);
         } else {
-            g_axis_total_steps[i] = (uint32_t)(g_motion_start_step[i] - g_target_step[i]);
+            total_steps = (uint32_t)(g_motion_start_step[i] - g_target_step[i]);
         }
 
-        if (g_axis_total_steps[i] > 0 && MOTION_MAX_STEP_RATE_SPS > 0) {
+        if (total_steps > 0 && max_step_rate_sps[i] > 0) {
             uint32_t required_ms;
 
-            required_ms = (g_axis_total_steps[i] * 1000u + MOTION_MAX_STEP_RATE_SPS - 1u) /
-                          MOTION_MAX_STEP_RATE_SPS;
+            required_ms = (total_steps * 1000u + max_step_rate_sps[i] - 1u) /
+                          max_step_rate_sps[i];
             if (required_ms > limited_duration_ms) {
                 limited_duration_ms = required_ms;
             }
         }
     }
 
-    total_move_ticks = limited_duration_ms * 100u;
-    if (total_move_ticks == 0) total_move_ticks = 1;
+    motion_feed_step_q16 = MOTION_FEED_ONE_Q16;
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+        uint32_t total_steps = g_target_step[i] >= g_motion_start_step[i] ?
+            (uint32_t)(g_target_step[i] - g_motion_start_step[i]) :
+            (uint32_t)(g_motion_start_step[i] - g_target_step[i]);
+        uint32_t nominal_sps;
+        uint32_t feed_step;
+        axis_nominal_rate_q16[i] = (uint32_t)(
+            ((uint64_t)total_steps * 1000u * MOTION_FEED_ONE_Q16) / limited_duration_ms);
+        nominal_sps = (axis_nominal_rate_q16[i] + MOTION_FEED_ONE_Q16 - 1u) >> 16;
+        if (nominal_sps == 0) continue;
+        feed_step = (uint32_t)(((uint64_t)acceleration_sps2[i] * MOTION_FEED_ONE_Q16 +
+                               (uint64_t)nominal_sps * 1000u - 1u) /
+                              ((uint64_t)nominal_sps * 1000u));
+        if (feed_step == 0) feed_step = 1;
+        if (feed_step < motion_feed_step_q16) motion_feed_step_q16 = feed_step;
+    }
+    motion_feed_q16 = 0;
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+        axis_phase_q16[i] = 0;
+        step_wait_10us[i] = 0;
+        axis_last_dir[i] = 0;
+        axis_dir_setup_wait[i] = 0;
+    }
 }
 
 void stepper_cancel_motion(void)
 {
-    total_move_ticks = 0;
+    motion_feed_q16 = 0;
+    motion_feed_step_q16 = 0;
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        axis_dda_accumulator[i] = 0;
+        axis_phase_q16[i] = 0;
+        axis_nominal_rate_q16[i] = 0;
         step_wait_10us[i] = 0;
+        axis_dir_setup_wait[i] = 0;
     }
 }
 
@@ -227,11 +261,15 @@ void stepper_init(void)
         limit_switch_debounce_count[i] = 0;
         homing_tick[i] = 0;
         g_homing_step_request[i] = 0;
-        axis_dda_accumulator[i] = 0;
+        axis_phase_q16[i] = 0;
+        axis_nominal_rate_q16[i] = 0;
+        axis_last_dir[i] = 0;
+        axis_dir_setup_wait[i] = 0;
         step_wait_10us[i] = 0;
         step_pin_low(i);
     }
-    total_move_ticks = 0;
+    motion_feed_q16 = 0;
+    motion_feed_step_q16 = 0;
 }
 
 void stepper_stop_axis(uint8_t id)
@@ -240,7 +278,8 @@ void stepper_stop_axis(uint8_t id)
 
     step_pin_low(id);
     g_homing_step_request[id] = 0;
-    axis_dda_accumulator[id] = 0;
+    axis_phase_q16[id] = 0;
+    axis_nominal_rate_q16[id] = 0;
     step_wait_10us[id] = 0;
     g_target_step[id] = g_current_step[id];
     g_motion_start_step[id] = g_current_step[id];
@@ -251,7 +290,7 @@ void stepper_stop_all(void)
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         stepper_stop_axis(i);
     }
-    total_move_ticks = 0;
+    motion_feed_q16 = 0;
 }
 
 // =======
@@ -366,6 +405,52 @@ void stepper_1ms_interrupt(void)
     g_limit_switch_bitmask = bitmask;
 }
 
+static uint32_t integer_sqrt_u64(uint64_t value)
+{
+    uint64_t bit = (uint64_t)1 << 62;
+    uint64_t result = 0;
+    while (bit > value) bit >>= 2;
+    while (bit != 0) {
+        if (value >= result + bit) {
+            value -= result + bit;
+            result = (result >> 1) + bit;
+        } else {
+            result >>= 1;
+        }
+        bit >>= 2;
+    }
+    return result > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)result;
+}
+
+void stepper_motion_1ms_interrupt(void)
+{
+    uint32_t target_feed = MOTION_FEED_ONE_Q16;
+    if (!g_motion_active || g_homing_active) return;
+
+    for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+        uint64_t remaining;
+        uint32_t allowed_sps;
+        uint32_t cap_feed;
+        if (axis_nominal_rate_q16[i] == 0) continue;
+        remaining = g_target_step[i] >= g_current_step[i] ?
+                    (uint64_t)(g_target_step[i] - g_current_step[i]) :
+                    (uint64_t)(g_current_step[i] - g_target_step[i]);
+        allowed_sps = integer_sqrt_u64(2u * (uint64_t)acceleration_sps2[i] * remaining);
+        cap_feed = (uint32_t)(((uint64_t)allowed_sps << 32) /
+                              axis_nominal_rate_q16[i]);
+        if (cap_feed < target_feed) target_feed = cap_feed;
+    }
+
+    if (motion_feed_step_q16 == 0) motion_feed_step_q16 = 1;
+    if (motion_feed_q16 < target_feed) {
+        uint32_t next = motion_feed_q16 + motion_feed_step_q16;
+        motion_feed_q16 = next > target_feed ? target_feed : next;
+    } else if (motion_feed_q16 > target_feed) {
+        motion_feed_q16 = motion_feed_q16 - target_feed > motion_feed_step_q16 ?
+                          motion_feed_q16 - motion_feed_step_q16 : target_feed;
+    }
+}
+
 
  //10us 타이머 인터럽트에서 호출됨
 void stepper_10us_interrupt(void)
@@ -398,35 +483,41 @@ void stepper_10us_interrupt(void)
     }
 
     // 3. 모션 구동 중이 아니라면 종료
-    if (!g_motion_active || total_move_ticks == 0) return;
+    if (!g_motion_active || motion_feed_q16 == 0) return;
 
     // 4. 각 축별 스텝 생성
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        uint32_t axis_delta_steps;
+        uint64_t actual_rate_q16;
+        const uint64_t phase_threshold = (uint64_t)100000u << 16;
         int8_t dir;
 
         // 목표에 도달하면
-        if (g_current_step[i] == g_target_step[i]) {
-            axis_dda_accumulator[i] = 0;
-            continue;
-        }
+        if (g_current_step[i] == g_target_step[i]) continue;
 
         // 탈조 안나게 대기시간
         if (step_wait_10us[i] > 0) {
             step_wait_10us[i]--;
         }
 
-        axis_delta_steps = g_axis_total_steps[i];
-
-        // DDA 알고리즘: 먼저 스텝을 모은 후 step_accumulation이 move_duration_10us보다 커져야지 실행됨
-        axis_dda_accumulator[i] += axis_delta_steps;
-        if (axis_dda_accumulator[i] < total_move_ticks || step_wait_10us[i] > 0) {
+        actual_rate_q16 = ((uint64_t)axis_nominal_rate_q16[i] * motion_feed_q16) >> 16;
+        axis_phase_q16[i] += actual_rate_q16;
+        if (axis_phase_q16[i] < phase_threshold || step_wait_10us[i] > 0) {
             continue;
         }
-        axis_dda_accumulator[i] -= total_move_ticks;
 
         // 방향
         dir = (g_current_step[i] < g_target_step[i]) ? DIR_POSITIVE : DIR_NEGATIVE;
+
+        if (axis_last_dir[i] != dir) {
+            set_dir(i, dir);
+            axis_last_dir[i] = dir;
+            axis_dir_setup_wait[i] = 1;
+            continue;
+        }
+        if (axis_dir_setup_wait[i] > 0) {
+            axis_dir_setup_wait[i]--;
+            continue;
+        }
 
         // 홈 방향으로 갈떄 리미트 스위치 누르면 멈추기
         if (dir == home_dir[i] && (g_limit_switch_bitmask & (1 << i))) {
@@ -438,7 +529,7 @@ void stepper_10us_interrupt(void)
         }
 
         // 스텝 출력
-        set_dir(i, dir);
+        axis_phase_q16[i] -= phase_threshold;
         step_pin_high(i);
         if (dir > 0) g_current_step[i]++;
         else         g_current_step[i]--;

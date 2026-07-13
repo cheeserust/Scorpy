@@ -10,6 +10,10 @@ static CanFrame g_pending_position_frame;
 static uint8_t g_status_tx_pending;
 static uint8_t g_position_tx_pending;
 static uint32_t g_next_tx_retry_ms;
+#define ACK_TX_QUEUE_SIZE 32
+static CanFrame g_ack_tx_queue[ACK_TX_QUEUE_SIZE];
+static uint8_t g_ack_tx_head;
+static uint8_t g_ack_tx_tail;
 
 static int32_t read_i32_le(const uint8_t *p)
 {
@@ -70,8 +74,6 @@ void board_can_request_status_event(void)
 static void enter_error(uint8_t error_code)
 {
     trajectory_clear();
-    trajectory_cancel_queue_overflow_clear();
-    g_queue_overflow = 0;
     g_error_code = error_code;
     if (!ESTOP_ACTIVE()) g_state = STATE_ERROR;
     board_can_request_status_event();
@@ -87,6 +89,92 @@ static uint8_t motion_command_allowed(void)
     return 1;
 }
 
+static uint8_t goal_ack_is_repetitive(uint8_t result)
+{
+    return (result == GOAL_ACK_DUPLICATE || result == GOAL_ACK_BUSY) ? 1 : 0;
+}
+
+static uint8_t goal_ack_matches(const CanFrame *frame, uint8_t result,
+                                uint8_t goal_id, uint8_t mask,
+                                uint16_t duration_ms)
+{
+    if (frame->data[1] != result || frame->data[2] != goal_id ||
+        frame->data[3] != mask) {
+        return 0;
+    }
+
+    return (frame->data[6] == (uint8_t)(duration_ms & 0xFF) &&
+            frame->data[7] == (uint8_t)(duration_ms >> 8)) ? 1 : 0;
+}
+
+static void fill_goal_ack(CanFrame *frame, uint8_t result, uint8_t goal_id,
+                          uint8_t mask, uint16_t duration_ms)
+{
+    frame->id = BOARD_ACK_CAN_ID;
+    frame->dlc = 8;
+    frame->data[0] = 3;
+    frame->data[1] = result;
+    frame->data[2] = goal_id;
+    frame->data[3] = mask;
+    frame->data[4] = g_state;
+    frame->data[5] = 0;
+    frame->data[6] = (uint8_t)(duration_ms & 0xFF);
+    frame->data[7] = (uint8_t)(duration_ms >> 8);
+}
+
+static void queue_goal_ack(uint8_t result, uint8_t goal_id,
+                           uint8_t mask, uint16_t duration_ms)
+{
+    uint8_t next = (uint8_t)((g_ack_tx_tail + 1) % ACK_TX_QUEUE_SIZE);
+    uint8_t index;
+    CanFrame *frame;
+
+    if (goal_ack_is_repetitive(result)) {
+        index = g_ack_tx_head;
+        while (index != g_ack_tx_tail) {
+            if (goal_ack_matches(&g_ack_tx_queue[index], result, goal_id,
+                                 mask, duration_ms)) {
+                return;
+            }
+            index = (uint8_t)((index + 1) % ACK_TX_QUEUE_SIZE);
+        }
+    }
+
+    if (next == g_ack_tx_head) {
+        if (goal_ack_is_repetitive(result)) return;
+
+        index = g_ack_tx_head;
+        while (index != g_ack_tx_tail) {
+            if (goal_ack_is_repetitive(g_ack_tx_queue[index].data[1])) {
+                fill_goal_ack(&g_ack_tx_queue[index], result, goal_id,
+                              mask, duration_ms);
+                return;
+            }
+            index = (uint8_t)((index + 1) % ACK_TX_QUEUE_SIZE);
+        }
+        return;
+    }
+
+    frame = &g_ack_tx_queue[g_ack_tx_tail];
+    fill_goal_ack(frame, result, goal_id, mask, duration_ms);
+    g_ack_tx_tail = next;
+}
+
+void board_can_cancel_goal_acks(void)
+{
+    g_ack_tx_head = g_ack_tx_tail;
+}
+
+void board_can_drain_goal_events(void)
+{
+    uint8_t goal_id;
+    uint8_t mask;
+    uint16_t duration_ms;
+    while (trajectory_take_timeout_event(&goal_id, &mask, &duration_ms)) {
+        queue_goal_ack(GOAL_ACK_STAGING_TIMEOUT, goal_id, mask, duration_ms);
+    }
+}
+
 static void handle_estop(const CanFrame *frame)
 {
 #if ENABLE_ESTOP_LOGIC
@@ -96,15 +184,11 @@ static void handle_estop(const CanFrame *frame)
     }
 
     g_estop = 1;
-    g_enabled = 0;
-    g_error_code = ERR_NONE;
-    trajectory_cancel_queue_overflow_clear();
-    g_queue_overflow = 0;
     g_homing_active = 0;
     g_state = STATE_ESTOP;
     trajectory_clear();
     stepper_stop_all();
-    motor_disable();
+    board_can_cancel_goal_acks();
     board_can_request_status_event();
 #else
     (void)frame;
@@ -153,11 +237,6 @@ static void handle_arm_homing(const CanFrame *frame)
         return;
     }
 
-    if (g_queue_overflow) {
-        board_can_request_status_event();
-        return;
-    }
-
     if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE) {
         enter_error(ERR_INVALID_CMD);
         return;
@@ -178,19 +257,10 @@ static void handle_clear_error(const CanFrame *frame)
         return;
     }
 
-    if (g_queue_overflow && g_error_code == ERR_NONE) {
-        trajectory_request_queue_overflow_clear();
-        board_can_request_status_event();
-        return;
-    } else {
-        g_error_code = ERR_NONE;
-        trajectory_cancel_queue_overflow_clear();
-        g_queue_overflow = 0;
-        trajectory_clear();
-    }
-    if (!ESTOP_ACTIVE()) {
-        g_state = g_enabled ? STATE_IDLE : STATE_DISABLED;
-    }
+    g_estop = 0;
+    g_error_code = ERR_NONE;
+    trajectory_clear();
+    g_state = g_enabled ? STATE_IDLE : STATE_DISABLED;
     board_can_request_status_event();
 }
 
@@ -198,62 +268,82 @@ static void handle_board_move(const CanFrame *frame)
 {
     uint8_t b0;
     uint8_t motor_id;
-    uint8_t execute;
     uint8_t relative;
     uint8_t step_mode;
-    uint8_t duration_5ms;
+    uint8_t goal_id;
+    uint8_t mask = 0;
+    uint16_t duration_ms;
     int32_t target_raw;
     int32_t target_step;
-    uint16_t speed;
     uint8_t result;
 
     if (!frame_is_exact_8_bytes(frame)) {
-        enter_error(ERR_INVALID_CMD);
-        return;
-    }
-    if (g_queue_overflow) {
-        board_can_request_status_event();
-        return;
-    }
-    if (!motion_command_allowed()) {
-        enter_error(ERR_INVALID_CMD);
+        queue_goal_ack(GOAL_ACK_INVALID, 0, 0, 0);
         return;
     }
 
     b0 = frame->data[0];
-    execute = (b0 & CAN_CTRL_EXECUTE) ? 1 : 0;
     relative = (b0 & CAN_CTRL_RELATIVE) ? 1 : 0;
     step_mode = (b0 & CAN_CTRL_STEP_MODE) ? 1 : 0;
     motor_id = b0 & CAN_CTRL_MOTOR_MASK;
+    goal_id = frame->data[5];
+    duration_ms = read_u16_le(&frame->data[6]);
 
-    if (!execute || (b0 & CAN_CTRL_RESERVED) || motor_id >= AXIS_COUNT) {
-        enter_error(ERR_INVALID_CMD);
+    if (!motion_command_allowed() || !(b0 & CAN_CTRL_EXECUTE) ||
+        !(b0 & CAN_CTRL_GOAL_V3) || relative || motor_id >= AXIS_COUNT ||
+        duration_ms == 0) {
+        queue_goal_ack(GOAL_ACK_INVALID, goal_id, 0, duration_ms);
         return;
     }
 
     target_raw = read_i32_le(&frame->data[1]);
-    speed = read_u16_le(&frame->data[5]);
-    duration_5ms = frame->data[7];
 
     if (!trajectory_resolve_target_step(motor_id, target_raw, relative, step_mode, &target_step)) {
-        enter_error(ERR_INVALID_CMD);
+        queue_goal_ack(GOAL_ACK_INVALID, goal_id, 0, duration_ms);
         return;
     }
 
-    result = trajectory_add_axis_command(motor_id, target_step, speed, duration_5ms);
-    if (result == TRAJECTORY_STAGING_INVALID) {
-        enter_error(ERR_INVALID_CMD);
+    result = trajectory_stage_goal_axis(motor_id, target_step, goal_id,
+                                        duration_ms, &mask);
+    if (result == GOAL_STAGE_READY) {
+        queue_goal_ack(GOAL_ACK_READY, goal_id, mask, duration_ms);
+        board_can_request_status_event();
+    } else if (result == GOAL_STAGE_DUPLICATE) {
+        queue_goal_ack(GOAL_ACK_DUPLICATE, goal_id, mask, duration_ms);
+    } else if (result == GOAL_STAGE_BUSY) {
+        queue_goal_ack(GOAL_ACK_BUSY, goal_id, mask, duration_ms);
+    } else if (result == GOAL_STAGE_INVALID) {
+        queue_goal_ack(GOAL_ACK_CONFLICT, goal_id, mask, duration_ms);
+    }
+}
+
+static void handle_goal_control(const CanFrame *frame)
+{
+    uint8_t goal_id;
+    uint16_t duration_ms;
+    if (!frame_is_exact_8_bytes(frame) || !reserved_zero(frame, 2)) {
+        queue_goal_ack(GOAL_ACK_INVALID, frame ? frame->data[1] : 0, 0, 0);
         return;
     }
-    if (result == TRAJECTORY_STAGING_QUEUE_FULL) {
-        trajectory_cancel_queue_overflow_clear();
-        g_queue_overflow = 1;
-        board_can_request_status_event();
+    goal_id = frame->data[1];
+    duration_ms = trajectory_goal_duration_ms();
+    if (frame->data[0] == GOAL_CONTROL_START) {
+        if (!motion_command_allowed() || !trajectory_start_goal(goal_id)) {
+            queue_goal_ack(GOAL_ACK_INVALID, goal_id, trajectory_goal_mask(), duration_ms);
+            return;
+        }
+        queue_goal_ack(GOAL_ACK_STARTED, goal_id, trajectory_goal_mask(), duration_ms);
+    } else if (frame->data[0] == GOAL_CONTROL_CANCEL) {
+        if (!trajectory_cancel_goal(goal_id)) {
+            queue_goal_ack(GOAL_ACK_CONFLICT, goal_id, trajectory_goal_mask(), duration_ms);
+            return;
+        }
+        queue_goal_ack(GOAL_ACK_CANCELLED, goal_id, 0, duration_ms);
+    } else {
+        queue_goal_ack(GOAL_ACK_INVALID, goal_id, 0, duration_ms);
         return;
     }
-    if (result == TRAJECTORY_STAGING_COMMITTED) {
-        board_can_request_status_event();
-    }
+    board_can_request_status_event();
 }
 
 void board_can_handle_frame(const CanFrame *frame)
@@ -275,6 +365,9 @@ void board_can_handle_frame(const CanFrame *frame)
         break;
     case BOARD_MOVE_CAN_ID:
         handle_board_move(frame);
+        break;
+    case CAN_ID_GOAL_CONTROL:
+        handle_goal_control(frame);
         break;
     default:
         break;
@@ -327,7 +420,7 @@ void board_can_queue_status(void)
     frame.data[2] = (uint8_t)(axis_flags[0] | (uint8_t)(axis_flags[1] << 4));
     frame.data[3] = (uint8_t)(axis_flags[2] | (uint8_t)(axis_flags[3] << 4));
     frame.data[4] = stepper_limit_switch_status_bits();
-    frame.data[5] = get_free_axis_command_count();
+    frame.data[5] = ESTOP_ACTIVE() ? 0 : trajectory_goal_slot_free();
     frame.data[6] = system_enabled_status();
     frame.data[7] = g_status_sequence_counter;
 
@@ -396,6 +489,16 @@ void board_can_service_tx(void)
     Mcp2515SendResult result;
 
     if ((int32_t)(global_tick_ms - g_next_tx_retry_ms) < 0) return;
+
+    if (g_ack_tx_head != g_ack_tx_tail) {
+        result = mcp2515_send_frame(&g_ack_tx_queue[g_ack_tx_head]);
+        if (result == MCP2515_SEND_OK) {
+            g_ack_tx_head = (uint8_t)((g_ack_tx_head + 1) % ACK_TX_QUEUE_SIZE);
+        } else {
+            g_next_tx_retry_ms = global_tick_ms + 1;
+            return;
+        }
+    }
 
     if (g_status_tx_pending) {
         result = mcp2515_send_frame(&g_pending_status_frame);

@@ -77,6 +77,7 @@ void TIM3_IRQHandler(void)
         TIM3->SR &= ~(1 << 0);  // UIF clear: update interrupt flag 초기화
 
         trajectory_1ms_interrupt();  // 1ms 주기로 궤적 보간 목표 위치 갱신
+        stepper_motion_1ms_interrupt();
         stepper_1ms_interrupt(); // 1ms주기로 리미트 스위치 판단
         stepper_homing_1ms();
     }

@@ -1,5 +1,9 @@
 # Server Team Note: Board1/Board2 CAN Feedback Compact Format
 
+> **주의:** 이 문서의 feedback 형식은 유지되지만 command가 unchanged라는 설명은
+> 더 이상 맞지 않는다. Board1/Board2 command와 Status Byte5 의미는
+> `CAN_GOAL_V3_PROTOCOL.md`를 따른다.
+
 Date: 2026-07-05
 
 This document describes the changed Board1 and Board2 feedback frames. Command frames are unchanged.

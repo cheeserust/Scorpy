@@ -341,7 +341,7 @@ static void sendStatus()
     data[2] = makeAxisFlags() & 0x0F;
     data[3] = 0;
     data[4] = limitPressedRaw() ? 0x01 : 0x00;
-    data[5] = queueFreeCount();
+    data[5] = estopActive ? 0 : queueFreeCount();
     data[6] = enabled ? 1 : 0;
     data[7] = statusSequence++;
 
@@ -471,11 +471,8 @@ static void handleEstop(uint8_t len, const uint8_t *data)
 
     clearQueueAndMotion();
     homingActive = false;
-    enabled = false;
     estopActive = true;
-    errorCode = ERR_NONE;
     state = STATE_ESTOP;
-    setMotorEnabled(false);
     requestStatusEvent();
 }
 
@@ -537,10 +534,10 @@ static void handleClearError(uint8_t len, const uint8_t *data)
         return;
     }
 
+    estopActive = false;
     errorCode = ERR_NONE;
     clearQueueAndMotion();
-    if (estopActive) state = STATE_ESTOP;
-    else state = enabled ? STATE_IDLE : STATE_DISABLED;
+    state = enabled ? STATE_IDLE : STATE_DISABLED;
     requestStatusEvent();
 }
 

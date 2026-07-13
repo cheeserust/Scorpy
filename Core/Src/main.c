@@ -63,8 +63,6 @@ int main(void)
     const uint8_t debug_uart = ENABLE_UART;
     uint8_t can_ready;
 
-    __disable_irq();  // 초기화 중 인터럽트 진입 방지
-
     clock_init_96mhz();    // SYSCLK 96MHz 설정
     gpio_init();           // GPIO 초기화
     uart_debug_init(debug_uart);  // UART 디버그 콘솔
@@ -72,7 +70,6 @@ int main(void)
     motor_disable();       // 초기 상태에서는 모터 출력 차단
     stepper_init();        // 스텝 모터 상태 변수 초기화
     trajectory_clear();    // 궤적 큐와 목표 위치 초기화
-    interrupts_init();     // SysTick, TIM2, TIM3 인터럽트 시작
     spi2_init();           // MCP2515 통신용 SPI2 초기화
     tmc5160_init_all();    // 모든 TMC 드라이버 설정
 
@@ -83,7 +80,7 @@ int main(void)
     }
 
     g_state = g_error_code == ERR_NONE ? STATE_DISABLED : STATE_ERROR;
-    __enable_irq();                   // 인터럽트 허용
+    interrupts_init();     // 상태와 통신 초기화 후 타이머 시작
     last_status_ms = global_tick_ms;
     last_feedback_ms = global_tick_ms;
     last_can_service_ms = global_tick_ms;
@@ -114,11 +111,7 @@ int main(void)
         if (trajectory_handle_staging_timeout()) {
             board_can_request_status_event();  // 다축 명령 수신 타임아웃 발생 시 상태 송신
         }
-
-        // TIM3가 queue 소진 후 overflow clear 요청을 승인하면 즉시 status로 ack
-        if (trajectory_take_queue_overflow_clear_ack()) {
-            board_can_request_status_event();
-        }
+        board_can_drain_goal_events();
 
         if ((global_tick_ms - last_can_service_ms) >= 1000) {
             last_can_service_ms = global_tick_ms;

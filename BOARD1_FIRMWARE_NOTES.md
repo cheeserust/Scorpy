@@ -89,6 +89,13 @@ Arduino Board2는 팔 5축을 담당하며 감속비는 120, 모터 full steps/r
 | 0x101 | Board1 Arm/Base Axis Move |
 | 0x201 | Board1 Status |
 
+`0x001` E-stop은 모든 STEP/goal/homing을 즉시 정지하지만 현재 motor enable
+상태를 유지합니다. 이미 enabled이면 holding torque를 유지하고, disabled이면
+자동 enable하지 않습니다. `0x010 Enable=1` 또는 `0x030 Clear Error`가 E-stop을
+해제하며 취소된 작업은 자동 재시작하지 않습니다. 실제 motor disable은
+`0x010 Enable=0`을 명시적으로 보낼 때만 수행합니다. 이 동작은 안전 인증된
+STO가 아닌 software powered hold입니다.
+
 ## 주의
 
 1. MCP2515 모듈은 8MHz 크리스탈 기준 500kbps CAN 설정을 사용합니다.

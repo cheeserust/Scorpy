@@ -246,12 +246,13 @@ static void mcp_configure_rx_filters(void)
     mcp_write_standard_id(MCP_RXM0SIDH, 0x7FF);
     mcp_write_standard_id(MCP_RXM1SIDH, 0x7FF);
 
-    mcp_write_standard_id(MCP_RXF0SIDH, CAN_ID_ESTOP);
-    mcp_write_standard_id(MCP_RXF1SIDH, CAN_ID_ENABLE);
-    mcp_write_standard_id(MCP_RXF2SIDH, CAN_ID_HOMING);
-    mcp_write_standard_id(MCP_RXF3SIDH, CAN_ID_CLEAR_ERROR);
-    mcp_write_standard_id(MCP_RXF4SIDH, BOARD_MOVE_CAN_ID);
-    mcp_write_standard_id(MCP_RXF5SIDH, BOARD_MOVE_CAN_ID);
+    /* Goal frames use RXB0 and may roll over into RXB1 during a four-frame burst. */
+    mcp_write_standard_id(MCP_RXF0SIDH, BOARD_MOVE_CAN_ID);
+    mcp_write_standard_id(MCP_RXF1SIDH, CAN_ID_ESTOP);
+    mcp_write_standard_id(MCP_RXF2SIDH, CAN_ID_ENABLE);
+    mcp_write_standard_id(MCP_RXF3SIDH, CAN_ID_HOMING);
+    mcp_write_standard_id(MCP_RXF4SIDH, CAN_ID_CLEAR_ERROR);
+    mcp_write_standard_id(MCP_RXF5SIDH, CAN_ID_GOAL_CONTROL);
 
     mcp_write_reg(MCP_RXB0CTRL, 0x04);   /* Use filters, enable rollover to RXB1 */
     mcp_write_reg(MCP_RXB1CTRL, 0x00);   /* Use filters */
@@ -337,8 +338,16 @@ uint8_t mcp2515_service(void)
     eflg = mcp_read_reg(MCP_EFLG);
     if (g_mcp2515_spi_fault) return mcp2515_recover();
 
-    if (eflg & (MCP_EFLG_TXBO | MCP_EFLG_RX0OVR | MCP_EFLG_RX1OVR)) {
+    if (eflg & MCP_EFLG_TXBO) {
         return mcp2515_recover();
+    }
+
+    if (eflg & (MCP_EFLG_RX0OVR | MCP_EFLG_RX1OVR)) {
+        /* An RX overflow already dropped a frame. Keep the controller and
+         * pending TX frames alive so the server can recover by retrying the
+         * complete goal batch. */
+        mcp_bit_modify(MCP_EFLG,
+                       (uint8_t)(MCP_EFLG_RX0OVR | MCP_EFLG_RX1OVR), 0x00);
     }
 
     if (intf & (MCP_ERRIF | MCP_MERRF | MCP_WAKIF)) {
@@ -500,7 +509,7 @@ void spi2_init(void)
 {
     volatile int i;
     unsigned int br_bits = 0;
-    unsigned int tmp = 64;
+    unsigned int tmp = 16;
 
     /* Convert divider to STM32 BR field approximately.
      * div=2 -> 0, div=4 -> 1, ... div=256 -> 7
@@ -559,8 +568,9 @@ void spi2_init(void)
 
     /* SPI mode 0, 8-bit, master, software NSS.
      * Current project clock: PCLK1 = 48 MHz.
-     * div=64 -> SPI2 SCK around 750 kHz.
-     * MCP2515 is stable at this speed during bring-up.
+     * div=16 -> SPI2 SCK around 3 MHz.
+     * This leaves enough margin to drain a four-frame goal burst before the
+     * MCP2515's two RX buffers overflow.
      */
     SPI2->CR1 =
         (0 << 11) |

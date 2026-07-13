@@ -1,4 +1,5 @@
 #include "../Inc/config.h"
+#include "../Inc/board_can.h"
 #include "../Inc/gpio.h"
 #include "../Inc/stepper.h"
 #include "../Inc/trajectory.h"
@@ -36,6 +37,7 @@ static char s_line[UART_LINE_MAX];
 static uint8_t s_line_len;
 static uint8_t s_last_was_cr;
 static uint32_t s_last_heartbeat_ms;
+static uint8_t s_debug_goal_id;
 
 static void print_prompt(void);
 
@@ -335,7 +337,7 @@ static void print_help(void)
     uart2_puts("  c              clear error\n");
     uart2_puts("  home           start all-axis homing\n");
     uart2_puts("  home1          start single-axis homing\n");
-    uart2_puts("  s              stop queued/current motion\n");
+    uart2_puts("  s              stop current goal\n");
     uart2_puts("  x              estop");
     if (!ENABLE_ESTOP_LOGIC) uart2_puts(" disabled");
     uart2_puts("\n");
@@ -350,7 +352,6 @@ static uint8_t motion_command_allowed(void)
     if (!g_enabled) return 0;
     if (ESTOP_ACTIVE()) return 0;
     if (g_error_code != ERR_NONE) return 0;
-    if (g_queue_overflow) return 0;
     if (g_homing_active) return 0;
     if (!system_all_homed()) return 0;
     return 1;
@@ -368,7 +369,6 @@ static void print_status(void)
     uint8_t homed_snapshot;
     uint8_t limit_snapshot;
 
-    __disable_irq();
     tick_snapshot = global_tick_ms;
     state_snapshot = g_state;
     error_snapshot = system_reported_error_code();
@@ -379,7 +379,7 @@ static void print_status(void)
         current[i] = g_current_step[i];
         target[i] = g_target_step[i];
     }
-    __enable_irq();
+    __DMB();
 
     limit_snapshot = stepper_limit_switch_status_bits();
 
@@ -446,27 +446,17 @@ static void handle_disable(void)
 
 static void handle_clear_error(void)
 {
-    if (g_queue_overflow && g_error_code == ERR_NONE) {
-        trajectory_request_queue_overflow_clear();
-        uart2_puts("OK clear pending until queue drains\n");
-        print_prompt();
-        return;
-    } else {
-        g_error_code = ERR_NONE;
-        trajectory_cancel_queue_overflow_clear();
-        g_queue_overflow = 0;
-        trajectory_clear();
-    }
-    if (!ESTOP_ACTIVE()) {
-        g_state = g_enabled ? STATE_IDLE : STATE_DISABLED;
-    }
+    g_estop = 0;
+    g_error_code = ERR_NONE;
+    trajectory_clear();
+    g_state = g_enabled ? STATE_IDLE : STATE_DISABLED;
     uart2_puts("OK clear error\n");
     print_prompt();
 }
 
 static void handle_home(void)
 {
-    if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE || g_queue_overflow) {
+    if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE) {
         uart2_puts("ERR: enable first and clear estop/error\n");
         print_prompt();
         return;
@@ -487,7 +477,7 @@ static void handle_home_axis(uint8_t axis)
         print_prompt();
         return;
     }
-    if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE || g_queue_overflow) {
+    if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE) {
         uart2_puts("ERR: enable first and clear estop/error\n");
         print_prompt();
         return;
@@ -517,13 +507,11 @@ static void handle_estop(void)
 {
 #if ENABLE_ESTOP_LOGIC
     g_estop = 1;
-    g_enabled = 0;
-    g_error_code = ERR_NONE;
     g_homing_active = 0;
     g_state = STATE_ESTOP;
     trajectory_clear();
     stepper_stop_all();
-    motor_disable();
+    board_can_cancel_goal_acks();
     uart2_puts("OK estop\n");
 #else
     uart2_puts("OK estop ignored\n");
@@ -642,7 +630,7 @@ static void handle_raw_jog_command(const char *line)
         print_prompt();
         return;
     }
-    if (ESTOP_ACTIVE() || g_error_code != ERR_NONE || g_queue_overflow) {
+    if (ESTOP_ACTIVE() || g_error_code != ERR_NONE) {
         uart2_puts("ERR: clear estop/error first\n");
         print_prompt();
         return;
@@ -679,12 +667,11 @@ static void handle_raw_jog_command(const char *line)
             break;
         }
 
-        __disable_irq();
         if (dir > 0) g_current_step[axis]++;
         else g_current_step[axis]--;
         g_target_step[axis] = g_current_step[axis];
         g_motion_start_step[axis] = g_current_step[axis];
-        __enable_irq();
+        __DMB();
     }
 
     raw_step_low(axis);
@@ -702,8 +689,8 @@ static void handle_move_command(const char *line)
     uint32_t steps = DEFAULT_MOVE_STEPS;
     uint32_t duration_ms = DEFAULT_DURATION_MS;
     uint8_t axis = (uint8_t)(line[0] - '1');
-    uint8_t duration_5ms;
-    uint8_t result = TRAJECTORY_STAGING_WAITING;
+    uint8_t mask = 0;
+    uint8_t result = GOAL_STAGE_WAITING;
     int32_t delta;
 
     if (axis >= AXIS_COUNT) {
@@ -758,37 +745,30 @@ static void handle_move_command(const char *line)
         return;
     }
 
-    __disable_irq();
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         targets[i] = trajectory_get_planned_step(i);
     }
-    __enable_irq();
+    __DMB();
     targets[axis] = selected_target;
 
-    duration_5ms = (uint8_t)((duration_ms + 4) / 5);
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-        result = trajectory_add_axis_command(i, targets[i], 0, duration_5ms);
-        if (result == TRAJECTORY_STAGING_INVALID) {
+        result = trajectory_stage_goal_axis(i, targets[i], s_debug_goal_id,
+                                            (uint16_t)duration_ms, &mask);
+        if (result == GOAL_STAGE_INVALID || result == GOAL_STAGE_BUSY) {
             uart2_puts("ERR: invalid move\n");
             print_prompt();
             return;
         }
-        if (result == TRAJECTORY_STAGING_QUEUE_FULL) {
-            trajectory_cancel_queue_overflow_clear();
-            g_queue_overflow = 1;
-            uart2_puts("ERR: queue full\n");
-            print_prompt();
-            return;
-        }
     }
 
-    if (result == TRAJECTORY_STAGING_COMMITTED) {
+    if (result == GOAL_STAGE_READY && trajectory_start_goal(s_debug_goal_id)) {
+        s_debug_goal_id++;
         uart2_puts("OK move axis");
         uart2_put_u32((uint32_t)axis + 1);
         uart2_putc(line[1]);
         uart2_put_u32(steps);
         uart2_puts(" duration=");
-        uart2_put_u32((uint32_t)duration_5ms * 5);
+        uart2_put_u32(duration_ms);
         uart2_puts("ms\n");
     } else {
         uart2_puts("ERR: move not committed\n");
