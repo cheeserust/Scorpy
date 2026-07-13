@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import math
 import os
 import time
@@ -87,10 +88,67 @@ class NavGoToServer(Node):
         return CancelResponse.ACCEPT
 
     async def execute_callback(self, goal_handle):
+        result = RunTask.Result()
+        try:
+            start_delay_sec = self.parse_start_delay_sec(
+                goal_handle.request.extra_json
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            result.success = False
+            result.message = f'invalid navigation extra_json: {exc}'
+            goal_handle.abort()
+            return result
+
+        if start_delay_sec > 0.0:
+            feedback = RunTask.Feedback()
+            feedback.phase = 'WAIT_MAP_SETTLE'
+            feedback.progress = 0.05
+            feedback.detail = (
+                f'waiting {start_delay_sec:.1f}s before Nav2 goal'
+            )
+            goal_handle.publish_feedback(feedback)
+            self.get_logger().info(
+                f'Waiting {start_delay_sec:.1f}s before Nav2 goal: '
+                f'{goal_handle.request.target_name}'
+            )
+            if not self.wait_for_start_delay(goal_handle, start_delay_sec):
+                result.success = False
+                result.message = 'nav task canceled during start delay'
+                goal_handle.canceled()
+                return result
+
         if self.mock_mode:
             return await self.execute_mock(goal_handle)
 
         return await self.execute_real_nav2(goal_handle)
+
+    @staticmethod
+    def parse_start_delay_sec(extra_json):
+        """Return the optional per-goal delay before sending a Nav2 goal."""
+        if not extra_json:
+            return 0.0
+        extra = json.loads(extra_json)
+        if not isinstance(extra, dict):
+            raise ValueError('extra_json root must be a mapping')
+        delay_sec = float(extra.get('start_delay_sec', 0.0))
+        if not math.isfinite(delay_sec) or delay_sec < 0.0:
+            raise ValueError(
+                'start_delay_sec must be a finite, non-negative number'
+            )
+        return delay_sec
+
+    @staticmethod
+    def wait_for_start_delay(goal_handle, delay_sec):
+        """Wait for map settling while remaining responsive to cancellation."""
+        deadline = time.monotonic() + delay_sec
+        while rclpy.ok():
+            if goal_handle.is_cancel_requested:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return True
+            time.sleep(min(0.05, remaining))
+        return False
 
     async def execute_mock(self, goal_handle):
         goal = goal_handle.request

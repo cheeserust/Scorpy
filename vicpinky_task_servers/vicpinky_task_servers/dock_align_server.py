@@ -3,17 +3,32 @@
 import json
 import time
 
+from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32, Int32
 from vicpinky_interfaces.action import RunTask
 
 
+def update_alignment_hold(aligned_since, now, hold_sec, is_aligned):
+    """Track whether alignment stayed continuously valid long enough."""
+    if not is_aligned:
+        return None, False, 0.0
+
+    if aligned_since is None:
+        aligned_since = now
+
+    held_sec = max(0.0, now - aligned_since)
+    required_sec = max(0.0, hold_sec)
+    return aligned_since, held_sec >= required_sec, held_sec
+
+
 class DockAlignServer(Node):
+    """Align the base to a fresh marker pose before completing the action."""
+
     def __init__(self):
         super().__init__('dock_align_server')
 
@@ -25,8 +40,9 @@ class DockAlignServer(Node):
         self.declare_parameter('distance_topic', '/tag/target_distance')
         self.declare_parameter('marker_id_topic', '/tag/marker_id')
 
-        self.declare_parameter('target_distance_m', 1.37)
+        self.declare_parameter('target_distance_m', 1.27)
         self.declare_parameter('target_lateral_m', 0.0)
+        self.declare_parameter('aligned_hold_sec', 3.0)
 
         self.declare_parameter('x_tolerance_m', 0.07)
         self.declare_parameter('z_tolerance_m', 0.08)
@@ -52,6 +68,9 @@ class DockAlignServer(Node):
 
         self.default_target_distance_m = float(self.get_parameter('target_distance_m').value)
         self.default_target_lateral_m = float(self.get_parameter('target_lateral_m').value)
+        self.default_aligned_hold_sec = float(
+            self.get_parameter('aligned_hold_sec').value
+        )
 
         self.x_tolerance_m = float(self.get_parameter('x_tolerance_m').value)
         self.z_tolerance_m = float(self.get_parameter('z_tolerance_m').value)
@@ -70,7 +89,9 @@ class DockAlignServer(Node):
         self.latest_offset_x = None
         self.latest_distance = None
         self.latest_marker_id = None
-        self.latest_marker_time = 0.0
+        self.latest_offset_time = 0.0
+        self.latest_distance_time = 0.0
+        self.latest_marker_id_time = 0.0
 
         self.cb_group = ReentrantCallbackGroup()
 
@@ -100,14 +121,15 @@ class DockAlignServer(Node):
 
     def offset_callback(self, msg):
         self.latest_offset_x = float(msg.data)
-        self.latest_marker_time = time.monotonic()
+        self.latest_offset_time = time.monotonic()
 
     def distance_callback(self, msg):
         self.latest_distance = float(msg.data)
-        self.latest_marker_time = time.monotonic()
+        self.latest_distance_time = time.monotonic()
 
     def marker_id_callback(self, msg):
         self.latest_marker_id = int(msg.data)
+        self.latest_marker_id_time = time.monotonic()
 
     def goal_callback(self, goal_request):
         if goal_request.task_id not in ('dock_to_marker', 'align', 'tag_align'):
@@ -122,10 +144,19 @@ class DockAlignServer(Node):
         return max(min(v, limit), -limit)
 
     def has_fresh_marker(self):
+        now = time.monotonic()
         return (
             self.latest_offset_x is not None
             and self.latest_distance is not None
-            and time.monotonic() - self.latest_marker_time <= self.marker_timeout_sec
+            and now - self.latest_offset_time <= self.marker_timeout_sec
+            and now - self.latest_distance_time <= self.marker_timeout_sec
+        )
+
+    def has_fresh_marker_id(self, marker_id):
+        return (
+            self.latest_marker_id == marker_id
+            and time.monotonic() - self.latest_marker_id_time
+            <= self.marker_timeout_sec
         )
 
     async def execute_callback(self, goal_handle):
@@ -134,6 +165,7 @@ class DockAlignServer(Node):
 
         target_distance_m = self.default_target_distance_m
         target_lateral_m = self.default_target_lateral_m
+        aligned_hold_sec = self.default_aligned_hold_sec
 
         try:
             if goal.extra_json:
@@ -142,6 +174,10 @@ class DockAlignServer(Node):
                 if 'target_distance_cm' in extra:
                     target_distance_m = float(extra['target_distance_cm']) / 100.0
                 target_lateral_m = float(extra.get('target_lateral_m', target_lateral_m))
+                aligned_hold_sec = max(
+                    0.0,
+                    float(extra.get('aligned_hold_sec', aligned_hold_sec)),
+                )
         except Exception as e:
             result.success = False
             result.message = f'invalid extra_json: {e}'
@@ -155,6 +191,7 @@ class DockAlignServer(Node):
             return result
 
         start_time = time.monotonic()
+        aligned_since = None
 
         while rclpy.ok():
             if goal_handle.is_cancel_requested:
@@ -174,16 +211,31 @@ class DockAlignServer(Node):
             cmd = Twist()
 
             if not self.has_fresh_marker():
+                aligned_since = None
                 cmd.angular.z = self.search_angular_speed
                 self.cmd_vel_pub.publish(cmd)
-                self.publish_feedback(goal_handle, 'SEARCH_MARKER', 0.10, 'searching marker to right')
+                self.publish_feedback(
+                    goal_handle,
+                    'SEARCH_MARKER',
+                    0.10,
+                    'searching marker to right',
+                )
                 time.sleep(0.05)
                 continue
 
-            if goal.marker_id >= 0 and self.latest_marker_id != goal.marker_id:
+            if (
+                goal.marker_id >= 0
+                and not self.has_fresh_marker_id(goal.marker_id)
+            ):
+                aligned_since = None
                 cmd.angular.z = self.search_angular_speed
                 self.cmd_vel_pub.publish(cmd)
-                self.publish_feedback(goal_handle, 'SEARCH_MARKER', 0.15, f'waiting marker {goal.marker_id}')
+                self.publish_feedback(
+                    goal_handle,
+                    'SEARCH_MARKER',
+                    0.15,
+                    f'waiting marker {goal.marker_id}',
+                )
                 time.sleep(0.05)
                 continue
 
@@ -192,11 +244,47 @@ class DockAlignServer(Node):
 
             x_ok = abs(x_error) <= self.x_tolerance_m
             z_ok = abs(z_error) <= self.z_tolerance_m
+            is_aligned = x_ok and z_ok
+            entering_hold = is_aligned and aligned_since is None
+            aligned_since, hold_complete, held_sec = update_alignment_hold(
+                aligned_since,
+                time.monotonic(),
+                aligned_hold_sec,
+                is_aligned,
+            )
 
-            if x_ok and z_ok:
+            if is_aligned:
                 self.stop_robot()
+
+                if entering_hold and aligned_hold_sec > 0.0:
+                    self.get_logger().info(
+                        'Alignment entered tolerance; holding for '
+                        f'{aligned_hold_sec:.1f} s'
+                    )
+
+                if not hold_complete:
+                    hold_ratio = held_sec / max(aligned_hold_sec, 0.001)
+                    detail = (
+                        f'aligned for {held_sec:.1f}/'
+                        f'{aligned_hold_sec:.1f} s; '
+                        f'x={self.latest_offset_x:.3f}, '
+                        f'z={self.latest_distance:.3f}'
+                    )
+                    self.publish_feedback(
+                        goal_handle,
+                        'ALIGN_STABLE_HOLD',
+                        min(0.99, 0.90 + 0.09 * hold_ratio),
+                        detail,
+                    )
+                    time.sleep(0.05)
+                    continue
+
                 result.success = True
-                result.message = f'aligned: x={self.latest_offset_x:.3f}, z={self.latest_distance:.3f}'
+                result.message = (
+                    f'alignment stable for {aligned_hold_sec:.1f} s: '
+                    f'x={self.latest_offset_x:.3f}, '
+                    f'z={self.latest_distance:.3f}'
+                )
                 self.publish_feedback(goal_handle, 'ALIGNED', 1.0, result.message)
                 goal_handle.succeed()
                 return result

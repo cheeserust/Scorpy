@@ -53,7 +53,7 @@ REAR_IMAGE_TOPIC  = "/rear_camera/image_raw"
 FLOOR_IDS         = [4, 5]       # 랜딩 마커 ID = 층 번호
 
 MARKER_LENGTH     = 0.1          # 마커 한 변 길이(m)
-BOARDING_STOP_CM  = 35.0         # 승차시 BOARD 마커까지 목표 거리 (cm)
+BOARDING_STOP_CM  = 50.0         # 승차시 BOARD 마커까지 목표 거리 (cm)
 EXIT_STOP_CM      = 60.0        # 하차시 목표 거리 (cm)
 STOP_TOLERANCE_CM = 1.5          # 허용 오차
 
@@ -89,7 +89,8 @@ class ElevatorServers(Node):
         self.declare_parameter('board_wait_timeout_sec', 180.0)
         self.declare_parameter('exit_wait_timeout_sec', 180.0)
         self.declare_parameter('servo_timeout_sec', 90.0)
-        self.declare_parameter('boarding_target_distance_cm', BOARDING_STOP_CM)
+        self.declare_parameter(
+            'boarding_target_distance_cm', float(BOARDING_STOP_CM))
         self.declare_parameter('camera_stale_timeout_sec', 0.75)
 
         self.board_server_name = self.get_parameter('board_server_name').value
@@ -242,6 +243,18 @@ class ElevatorServers(Node):
             raise ValueError('target distance must be in [5, 300] cm')
         return target_cm
 
+    @staticmethod
+    def exit_target_cm(goal):
+        """Read the landing-marker-only exit distance from the action goal."""
+        target_cm = float(EXIT_STOP_CM)
+        if goal.extra_json:
+            extra = json.loads(goal.extra_json)
+            if 'exit_target_distance_cm' in extra:
+                target_cm = float(extra['exit_target_distance_cm'])
+        if not 5.0 <= target_cm <= 300.0:
+            raise ValueError('exit target distance must be in [5, 300] cm')
+        return target_cm
+
     # ── goal / cancel 콜백 ────────────────────────────────────
     def board_goal_cb(self, goal_request):
         if self.busy:
@@ -371,6 +384,13 @@ class ElevatorServers(Node):
         target_floor = int(goal.target_floor)
         dt = 1.0 / CONTROL_HZ
 
+        try:
+            target_distance_cm = self.exit_target_cm(goal)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return self.finish(
+                goal_handle, result, False,
+                f'exit: invalid extra_json: {exc}')
+
         self.rear_enabled = True  # 단독 테스트 시에도 후방 활성 보장
 
         # phase 1: 도착층 랜딩 마커 안정 검출 대기 (보통 /floor/check 통과 후라 즉시 통과)
@@ -416,12 +436,14 @@ class ElevatorServers(Node):
                 time.sleep(dt)
                 continue
             tz_cm, tx_m = pose
-            err = abs(tz_cm - EXIT_STOP_CM)
+            err = abs(tz_cm - target_distance_cm)
             init_err = init_err or max(err, 1.0)
             self.feedback(goal_handle, 'EXITING',
                           min(0.2 + 0.6 * (1 - err / init_err), 0.85),
                           f'dist {tz_cm:.1f}cm')
-            if self.servo_toward(tz_cm, tx_m, direction=-1, target_cm=EXIT_STOP_CM):
+            if self.servo_toward(
+                    tz_cm, tx_m, direction=-1,
+                    target_cm=target_distance_cm):
                 self.get_logger().info(f"하차 완료 ({tz_cm:.1f}cm) → 좌 90도 회전")
                 break
             time.sleep(dt)

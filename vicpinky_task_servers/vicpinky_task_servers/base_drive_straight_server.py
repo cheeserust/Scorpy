@@ -15,6 +15,23 @@ from rclpy.node import Node
 from vicpinky_interfaces.action import RunTask
 
 
+def parse_drive_options(extra_json, default_speed):
+    """Parse and validate a straight-drive action's numeric options."""
+    extra = json.loads(extra_json) if extra_json else {}
+    distance_m = float(extra.get('distance_m', 0.60))
+    speed_mps = float(extra.get('speed_mps', default_speed))
+    start_delay_sec = float(extra.get('start_delay_sec', 0.0))
+
+    if not all(math.isfinite(value) for value in (
+        distance_m,
+        speed_mps,
+        start_delay_sec,
+    )):
+        raise ValueError('drive options must be finite')
+
+    return distance_m, speed_mps, max(0.0, start_delay_sec)
+
+
 class BaseDriveStraightServer(Node):
     def __init__(self):
         super().__init__('base_drive_straight_server')
@@ -101,9 +118,10 @@ class BaseDriveStraightServer(Node):
         result = RunTask.Result()
 
         try:
-            extra = json.loads(goal.extra_json) if goal.extra_json else {}
-            distance_m = float(extra.get('distance_m', 0.60))
-            speed_mps = float(extra.get('speed_mps', self.linear_speed))
+            distance_m, speed_mps, start_delay_sec = parse_drive_options(
+                goal.extra_json,
+                self.linear_speed,
+            )
         except Exception as exc:
             result.success = False
             result.message = f'invalid extra_json: {exc}'
@@ -117,6 +135,38 @@ class BaseDriveStraightServer(Node):
 
         distance_m = abs(distance_m)
         speed_mps = max(abs(speed_mps), 0.01)
+
+        if start_delay_sec > 0.0:
+            delay_started = time.monotonic()
+            self.stop_robot()
+
+            while rclpy.ok():
+                if goal_handle.is_cancel_requested:
+                    self.stop_robot()
+                    result.success = False
+                    result.message = 'base drive canceled during start delay'
+                    goal_handle.canceled()
+                    return result
+
+                elapsed = time.monotonic() - delay_started
+                remaining = start_delay_sec - elapsed
+                if remaining <= 0.0:
+                    break
+
+                self.publish_feedback(
+                    goal_handle,
+                    'WAIT_START_DELAY',
+                    0.0,
+                    f'drive starts in {remaining:.1f} s',
+                )
+                time.sleep(min(0.05, remaining))
+
+            if not rclpy.ok():
+                self.stop_robot()
+                result.success = False
+                result.message = 'rclpy shutdown during start delay'
+                goal_handle.abort()
+                return result
 
         if self.mock_mode:
             return self.run_mock(goal_handle, result, distance_m, direction)

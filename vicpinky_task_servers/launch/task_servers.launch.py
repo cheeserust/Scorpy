@@ -23,7 +23,11 @@ def generate_launch_description():
                  'camera_cy': 244.0512732,
              }]),
         Node(package=PKG, executable='dock_align_server', output='screen',
-             parameters=[{'mock_mode': False, 'target_distance_m': 1.37}]),
+             parameters=[{
+                 'mock_mode': False,
+                 'target_distance_m': 1.27,
+                 'aligned_hold_sec': 3.0,
+             }]),
         Node(package=PKG, executable='elevator_door_server', output='screen',
              parameters=[{'mock_mode': False}]),
         Node(package=PKG, executable='floor_check_server', output='screen',
@@ -34,7 +38,7 @@ def generate_launch_description():
              parameters=[{'mock_mode': False}]),
         Node(package=PKG, executable='elevator_board_off', output='screen',
              parameters=[{
-                 'boarding_target_distance_cm': 35.0,
+                 'boarding_target_distance_cm': 50.0,
                  'camera_stale_timeout_sec': 0.75,
              }]),
         Node(package=PKG, executable='map_switcher', output='screen'),
