@@ -91,6 +91,7 @@ static uint8_t mock_motor_enable_calls;
 static uint8_t mock_motor_disable_calls;
 static uint8_t mock_trajectory_clear_calls;
 static uint8_t mock_stepper_stop_calls;
+static uint8_t mock_cancel_calls;
 
 void trajectory_clear(void);
 void stepper_stop_all(void);
@@ -208,6 +209,7 @@ uint8_t trajectory_start_goal(uint8_t goal_id)
 uint8_t trajectory_cancel_goal(uint8_t goal_id)
 {
     (void)goal_id;
+    mock_cancel_calls++;
     return 1;
 }
 
@@ -271,6 +273,7 @@ static void reset_fixture(uint8_t enabled)
     mock_motor_disable_calls = 0;
     mock_trajectory_clear_calls = 0;
     mock_stepper_stop_calls = 0;
+    mock_cancel_calls = 0;
     g_ack_tx_head = 0;
     g_ack_tx_tail = 0;
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
@@ -405,12 +408,60 @@ static void test_motion_and_homing_are_rejected_during_estop(void)
     assert(mock_homing_calls == 0);
 }
 
+static void test_active_goal_ignores_every_command_except_valid_estop(void)
+{
+    CanFrame cancel = control_frame(CAN_ID_GOAL_CONTROL, GOAL_CONTROL_CANCEL);
+    CanFrame disable = control_frame(CAN_ID_ENABLE, 0);
+    CanFrame clear = control_frame(CAN_ID_CLEAR_ERROR, HOMING_ALL_AXIS);
+    CanFrame home = control_frame(CAN_ID_HOMING, HOMING_ALL_AXIS);
+    CanFrame move = control_frame(BOARD_MOVE_CAN_ID, 0x90);
+    CanFrame malformed_estop = control_frame(CAN_ID_ESTOP, 1);
+    CanFrame estop = control_frame(CAN_ID_ESTOP, 1);
+
+    reset_fixture(1);
+    g_motion_active = 1;
+    g_state = STATE_MOVING;
+    mock_slot_free = 0;
+    cancel.data[1] = 42;
+    home.data[1] = 0;
+    move.data[5] = 42;
+    move.data[6] = 100;
+    malformed_estop.dlc = 7;
+
+    board_can_handle_frame(&cancel);
+    board_can_handle_frame(&disable);
+    board_can_handle_frame(&clear);
+    board_can_handle_frame(&home);
+    board_can_handle_frame(&move);
+    board_can_handle_frame(&malformed_estop);
+
+    assert(g_motion_active == 1);
+    assert(g_enabled == 1);
+    assert(g_estop == 0);
+    assert(g_error_code == ERR_NONE);
+    assert(g_state == STATE_MOVING);
+    assert(mock_cancel_calls == 0);
+    assert(mock_trajectory_clear_calls == 0);
+    assert(mock_stepper_stop_calls == 0);
+    assert(mock_homing_calls == 0);
+    assert(mock_motor_disable_calls == 0);
+    assert(mock_stage_calls == 0);
+
+    board_can_handle_frame(&estop);
+    assert(g_estop == 1);
+    assert(g_motion_active == 0);
+    assert(g_state == STATE_ESTOP);
+    assert(mock_trajectory_clear_calls == 1);
+    assert(mock_stepper_stop_calls == 1);
+}
+
 int main(void)
 {
     test_enabled_estop_holds_torque_and_clears_work();
     test_clear_releases_estop_without_changing_enable();
     test_enable_releases_estop_and_disable_is_explicit();
     test_motion_and_homing_are_rejected_during_estop();
+    test_active_goal_ignores_every_command_except_valid_estop();
     puts("board_can estop tests passed");
     return 0;
 }

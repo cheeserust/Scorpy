@@ -261,12 +261,14 @@ uint8_t trajectory_take_timeout_event(uint8_t *goal_id, uint8_t *mask,
 void trajectory_1ms_interrupt(void)
 {
     uint8_t reached = 1;
-    if (!g_enabled || ESTOP_ACTIVE() || g_error_code != ERR_NONE ||
-        g_homing_active || !system_all_homed()) {
-        if (g_motion_active) trajectory_stop_motion();
+    if (!g_motion_active || !g_goal.started) return;
+
+    /* START locks the goal. Runtime state/error changes must not cancel it;
+     * only E-stop is allowed to interrupt active motion. */
+    if (ESTOP_ACTIVE()) {
+        trajectory_stop_motion();
         return;
     }
-    if (!g_motion_active || !g_goal.started) return;
 
     for (uint8_t i = 0; i < AXIS_COUNT; i++) {
         if (g_current_step[i] != g_goal.target_step[i]) {

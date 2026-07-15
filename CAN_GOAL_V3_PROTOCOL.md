@@ -80,6 +80,18 @@ industrial emergency-stop function. With open-loop steppers, current position
 is estimated from commanded steps; an immediate stop can lose steps and make
 the estimate differ from the physical position.
 
+## Axis-local limit behavior
+
+During normal motion, a debounced limit switch blocks only movement of that
+local axis farther in its home direction. Firmware immediately changes that
+axis target to its current commanded position without setting the global
+`ERR_LIMIT_SWITCH_DETECTED`; other axes in the same goal continue. A later
+command in the opposite direction is allowed even while the switch is still
+active, so Clear Error is not required to move away from the limit. Status
+Byte4 continues to report the raw active limit bits. The server may therefore
+observe the coordinated goal as completed even though the blocked axis did not
+reach its originally requested target.
+
 Both boards generate a simple triangular/trapezoidal speed envelope internally.
 The configured initial limits are 1000 step/s and 500 step/s². An unsafe short
 duration may be extended; completion must be determined from status, not a

@@ -8,7 +8,7 @@
  * Hardware:
  * - MCP2515: CS D10, INT D2, SPI D11/D12/D13, 8 MHz crystal, 500 kbps CAN
  * - TB6600: STEP D6, DIR D7, ENA D8 active-low, 5 us STEP pulse
- * - Limit switch: D3, INPUT_PULLUP, active-low
+ * - Limit switch: D3, INPUT_PULLUP, active-high/inverted
  */
 
 #include <Arduino.h>
@@ -168,7 +168,7 @@ static void requestStatusEvent()
 
 static bool limitPressedRaw()
 {
-    return digitalRead(PIN_LIMIT) == LOW;
+    return digitalRead(PIN_LIMIT) == HIGH;
 }
 
 static void updateLimitDebounce(uint32_t nowMs)

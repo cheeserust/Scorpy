@@ -121,6 +121,30 @@ static void test_zero_distance_goal_holds_duration(void)
     assert(!g_motion_active && g_state == STATE_IDLE && trajectory_goal_slot_free());
 }
 
+static void test_started_goal_ignores_non_estop_runtime_state_changes(void)
+{
+    uint8_t mask = 0;
+
+    trajectory_clear();
+    for (uint8_t axis = 0; axis < AXIS_COUNT; axis++) {
+        uint8_t expected = axis == AXIS_COUNT - 1 ? GOAL_STAGE_READY : GOAL_STAGE_WAITING;
+        assert(stage(axis, 1000 + axis, 15, 5000, &mask) == expected);
+    }
+    assert(trajectory_start_goal(15));
+
+    g_enabled = 0;
+    g_error_code = 99;
+    g_homing_active = 1;
+    trajectory_1ms_interrupt();
+
+    assert(g_motion_active);
+    assert(!trajectory_goal_slot_free());
+
+    g_enabled = 1;
+    g_error_code = ERR_NONE;
+    g_homing_active = 0;
+}
+
 int main(void)
 {
     test_unordered_axes_become_ready();
@@ -129,6 +153,7 @@ int main(void)
     test_timeout_is_nonfatal();
     test_cancel_tombstones_late_goal();
     test_zero_distance_goal_holds_duration();
+    test_started_goal_ignores_non_estop_runtime_state_changes();
     puts("goal_v3 tests passed");
     return 0;
 }

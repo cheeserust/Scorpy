@@ -458,10 +458,9 @@ void stepper_10us_interrupt(void)
     // 1. 이전 스텝 핀 클리어
     clear_step_high_flag();
 
-    // 2. 시스템 상태 및 에러 체크
-    if (ESTOP_ACTIVE() || !g_enabled || g_error_code != ERR_NONE) {
-        return;
-    }
+    // 2. START된 Goal은 ESTOP 외의 상태/에러 변경으로 중단하지 않음
+    if (ESTOP_ACTIVE()) return;
+    if (!g_motion_active && (!g_enabled || g_error_code != ERR_NONE)) return;
 
     // 3. 홈으로 가는 플래그 처리
     if (g_homing_active) {
@@ -519,13 +518,14 @@ void stepper_10us_interrupt(void)
             continue;
         }
 
-        // 홈 방향으로 갈떄 리미트 스위치 누르면 멈추기
+        // 홈 방향으로 갈 때 리미트 스위치가 누르면 해당 축만 정지
         if (dir == home_dir[i] && (g_limit_switch_bitmask & (1 << i))) {
-            trajectory_clear();
-            g_homing_active = 0;
-            g_error_code = ERR_LIMIT_SWITCH_DETECTED;
-            g_state = STATE_ERROR;
-            return;
+            /* Limit blocking is axis-local and nonfatal. Stop only the axis
+             * moving farther into its home limit. Other axes in the same goal
+             * continue, and a later command in the opposite direction is
+             * allowed without Clear Error. */
+            stepper_stop_axis(i);
+            continue;
         }
 
         // 스텝 출력

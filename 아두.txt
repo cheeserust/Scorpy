@@ -411,7 +411,9 @@ static void serviceMotion()
         (HOME_DIR > 0) ? (activeTargetStep > currentStep) :
                          (activeTargetStep < currentStep);
     if (movingTowardHomeLimit && limitDebounced) {
-        enterError(ERR_LIMIT_SWITCH_DETECTED);
+        clearQueueAndMotion();
+        state = STATE_IDLE;
+        requestStatusEvent();
         return;
     }
 

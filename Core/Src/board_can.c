@@ -179,7 +179,8 @@ static void handle_estop(const CanFrame *frame)
 {
 #if ENABLE_ESTOP_LOGIC
     if (!frame_is_exact_8_bytes(frame) || frame->data[0] != 1 || !reserved_zero(frame, 1)) {
-        enter_error(ERR_INVALID_CMD);
+        /* A malformed frame must not break a locked goal. Only an exact,
+         * explicit E-stop command is allowed to stop active motion. */
         return;
     }
 
@@ -349,6 +350,12 @@ static void handle_goal_control(const CanFrame *frame)
 void board_can_handle_frame(const CanFrame *frame)
 {
     if (frame == 0) return;
+
+    /* Once START has made the goal active, the board owns that goal until it
+     * reaches the target. Ignore cancel, disable, homing, clear-error, and new
+     * move/start commands. A valid E-stop remains the only CAN command that
+     * may interrupt active motion. */
+    if (g_motion_active && frame->id != CAN_ID_ESTOP) return;
 
     switch (frame->id) {
     case CAN_ID_ESTOP:

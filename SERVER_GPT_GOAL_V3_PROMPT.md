@@ -253,6 +253,12 @@ Result:
 
 Move protocol 오류는 Status의 fatal `ERR_INVALID_CMD`가 아니라 ACK/NACK로 처리된다. 따라서 ACK parser를 반드시 구현한다.
 
+정상 이동 중 limit switch는 axis-local nonfatal 동작이다. 해당 축이 home
+방향으로 움직일 때 limit가 감지되면 펌웨어는 그 축 target만 current position으로
+바꾸고 다른 축은 계속 실행한다. global error는 발생하지 않으며 반대 방향 명령은
+Clear Error 없이 허용된다. Status Byte4 raw limit bit를 UI에 표시하되 blocked
+축의 원래 target 미도달 때문에 전체 goal을 강제로 실패 처리할 필요는 없다.
+
 ## 10. Status: Queue Free가 완전히 없어짐
 
 Board1 Status `0x201`, Board2 Status `0x202`, DLC 8 형식은 유지하지만 Byte5 의미가 변경됐다.

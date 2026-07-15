@@ -509,7 +509,10 @@ void spi2_init(void)
 {
     volatile int i;
     unsigned int br_bits = 0;
-    unsigned int tmp = 16;
+    /* STM32 SPI divisors are powers of two. With PCLK1=48 MHz there is no
+     * exact 1 MHz setting, so /64 = 750 kHz is the fastest setting that does
+     * not exceed the requested 1 MHz limit. */
+    unsigned int tmp = 64;
 
     /* Convert divider to STM32 BR field approximately.
      * div=2 -> 0, div=4 -> 1, ... div=256 -> 7
@@ -568,9 +571,7 @@ void spi2_init(void)
 
     /* SPI mode 0, 8-bit, master, software NSS.
      * Current project clock: PCLK1 = 48 MHz.
-     * div=16 -> SPI2 SCK around 3 MHz.
-     * This leaves enough margin to drain a four-frame goal burst before the
-     * MCP2515's two RX buffers overflow.
+     * div=64 -> SPI2 SCK around 750 kHz (the closest setting <= 1 MHz).
      */
     SPI2->CR1 =
         (0 << 11) |

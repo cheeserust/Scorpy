@@ -96,6 +96,10 @@ Arduino Board2는 팔 5축을 담당하며 감속비는 120, 모터 full steps/r
 `0x010 Enable=0`을 명시적으로 보낼 때만 수행합니다. 이 동작은 안전 인증된
 STO가 아닌 software powered hold입니다.
 
+정상 이동 중 home 방향 limit가 감지되면 해당 축만 current position에서
+정지하고 다른 축은 계속 이동합니다. global error는 설정하지 않으며 반대 방향
+명령은 Clear Error 없이 실행할 수 있습니다.
+
 ## 주의
 
 1. MCP2515 모듈은 8MHz 크리스탈 기준 500kbps CAN 설정을 사용합니다.
